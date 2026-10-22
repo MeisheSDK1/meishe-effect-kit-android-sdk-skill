@@ -1,0 +1,35 @@
+package __TARGET_PACKAGE__;
+
+import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
+public class NveVideoRecordingConfigTest {
+    @Test
+    public void portraitPreviewFitsEncoderLimitAndStaysAligned() {
+        NveVideoRecordingConfig.Dimensions dimensions =
+                NveVideoRecordingConfig.fitInside(1080, 1920, 1280);
+
+        assertEquals(720, dimensions.width);
+        assertEquals(1280, dimensions.height);
+        assertEquals(0, dimensions.width % 16);
+        assertEquals(0, dimensions.height % 16);
+    }
+
+    @Test
+    public void smallPreviewIsNotUpscaled() {
+        NveVideoRecordingConfig.Dimensions dimensions =
+                NveVideoRecordingConfig.fitInside(640, 480, 1280);
+
+        assertEquals(640, dimensions.width);
+        assertEquals(480, dimensions.height);
+    }
+
+    @Test
+    public void bitrateStaysWithinSafeBounds() {
+        assertEquals(2_000_000, NveVideoRecordingConfig.bitRate(320, 240));
+        assertTrue(NveVideoRecordingConfig.bitRate(1280, 1280) <= 12_000_000);
+    }
+}
+

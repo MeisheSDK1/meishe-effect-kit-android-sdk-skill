@@ -1,0 +1,35 @@
+package __TARGET_PACKAGE__;
+
+import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+public class NveBeautyCoordinatorTest {
+    @Test
+    public void masterOffUsesNeutralValueAndMasterOnRestoresDesiredValue() {
+        float desired = 0.65f;
+
+        assertEquals(
+                0f,
+                NveBeautyCoordinator.effectiveValue(false, desired),
+                0.0001f);
+        assertEquals(
+                desired,
+                NveBeautyCoordinator.effectiveValue(true, desired),
+                0.0001f);
+    }
+
+    @Test
+    public void skinSelectorChangesOnlyWhenTheAlgorithmActuallyChanges() {
+        assertFalse(NveBeautyCoordinator.shouldChangeSkinSelector(
+                "buffing-skin", "buffing-skin", "whitening-a"));
+        assertTrue(NveBeautyCoordinator.shouldChangeSkinSelector(
+                "advanced-buffing-1", "buffing-skin", "whitening-a"));
+        assertFalse(NveBeautyCoordinator.shouldChangeSkinSelector(
+                "whitening-a", "buffing-skin", "whitening-a"));
+        assertTrue(NveBeautyCoordinator.shouldChangeSkinSelector(
+                "whitening-b", "buffing-skin", "whitening-a"));
+    }
+}

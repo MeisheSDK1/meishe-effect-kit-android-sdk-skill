@@ -1,0 +1,113 @@
+package __TARGET_PACKAGE__;
+
+import org.junit.Test;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+
+public class NveMakeupAssetRepositoryTest {
+    private static final String VALID_ID = new UUID(1L, 2L).toString();
+    private static final String ZERO_ID = new UUID(0L, 0L).toString();
+
+    @Test
+    public void staleGenerationCannotPublishAfterNewSelection() {
+        QueueExecutor mainThreadExecutor = new QueueExecutor();
+        List<String> published = new ArrayList<>();
+        NveMakeupAssetRepository repository =
+                new NveMakeupAssetRepository((path, license, type) -> VALID_ID);
+
+        repository.installLatest(
+                selection("old"),
+                mainThreadExecutor,
+                Runnable::run,
+                result -> published.add(result.itemId));
+        repository.installLatest(
+                selection("new"),
+                mainThreadExecutor,
+                Runnable::run,
+                result -> published.add(result.itemId));
+
+        mainThreadExecutor.runFirst();
+        assertEquals(Collections.emptyList(), published);
+        mainThreadExecutor.runFirst();
+        assertEquals(Collections.singletonList("new"), published);
+    }
+
+    @Test
+    public void invalidPackageIdProducesIncompleteResult() {
+        List<NveMakeupAssetRepository.Result> published = new ArrayList<>();
+        NveMakeupAssetRepository repository =
+                new NveMakeupAssetRepository(
+                        (path, license, type) -> ZERO_ID);
+
+        repository.installLatest(
+                selection("broken"),
+                Runnable::run,
+                Runnable::run,
+                published::add);
+
+        assertEquals(1, published.size());
+        assertFalse(published.get(0).isComplete());
+        assertEquals(
+                Collections.singletonList("package"),
+                published.get(0).failedPackageKeys);
+    }
+
+    @Test
+    public void reusedPackageKeyRejectsDifferentMetadata() {
+        NveMakeupAssetRepository repository =
+                new NveMakeupAssetRepository((path, license, type) -> VALID_ID);
+        repository.installLatest(
+                selectionWithPath("first", "first.makeup"),
+                Runnable::run,
+                Runnable::run,
+                result -> { });
+
+        try {
+            repository.installLatest(
+                    selectionWithPath("second", "second.makeup"),
+                    Runnable::run,
+                    Runnable::run,
+                    result -> { });
+        } catch (IllegalArgumentException expected) {
+            return;
+        }
+        throw new AssertionError("conflicting package metadata must be rejected");
+    }
+
+    private static NveMakeupAssetRepository.Selection selection(String itemId) {
+        return selectionWithPath(itemId, "shared.makeup");
+    }
+
+    private static NveMakeupAssetRepository.Selection selectionWithPath(
+            String itemId,
+            String packagePath) {
+        return new NveMakeupAssetRepository.Selection(
+                itemId,
+                Collections.singletonList(
+                        new NveMakeupAssetRepository.PackageSpec(
+                                "package",
+                                packagePath,
+                                null,
+                                1)));
+    }
+
+    private static final class QueueExecutor implements Executor {
+        private final List<Runnable> tasks = new ArrayList<>();
+
+        @Override
+        public void execute(Runnable command) {
+            tasks.add(command);
+        }
+
+        void runFirst() {
+            tasks.remove(0).run();
+        }
+    }
+}

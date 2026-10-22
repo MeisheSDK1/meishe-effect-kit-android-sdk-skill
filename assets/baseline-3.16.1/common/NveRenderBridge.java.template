@@ -1,0 +1,68 @@
+package __TARGET_PACKAGE__;
+
+import com.meishe.nveffectkit.NveEffectKit;
+import com.meishe.nveffectkit.render.NveRenderInput;
+import com.meishe.nveffectkit.render.NveRenderOutput;
+import com.meishe.nveffectkit.render.NveTexture;
+import com.meishe.nveffectkit.render.enumeration.NveRenderError;
+import com.meishe.nveffectkit.render.enumeration.NveTextureType;
+
+/**
+ * Baseline render boundary. Adapt imports to the target AAR; do not change ownership rules.
+ */
+final class NveRenderBridge {
+    interface HostGl {
+        /** Rebind viewport, framebuffer, program, active texture and host texture bindings. */
+        void restoreHostGlState();
+        void drawRawInput();
+        void drawOes(NveTexture texture);
+        void draw2D(NveTexture texture);
+        void onRenderError(int errorCode);
+    }
+
+    private final NveEffectKit effectKit;
+    private final HostGl host;
+
+    NveRenderBridge(NveEffectKit effectKit, HostGl host) {
+        this.effectKit = effectKit;
+        this.host = host;
+    }
+
+    void renderFrame(NveRenderInput input) {
+        NveRenderOutput output = null;
+        try {
+            output = effectKit.renderEffect(input);
+            if (output == null
+                    || output.getErrorCode().getCode()
+                    != NveRenderError.NO_ERROR.getCode()) {
+                host.onRenderError(
+                        output == null ? -1 : output.getErrorCode().getCode());
+                host.restoreHostGlState();
+                host.drawRawInput();
+                return;
+            }
+            NveTexture texture = output.getTexture();
+            if (texture == null) {
+                host.restoreHostGlState();
+                host.drawRawInput();
+                return;
+            }
+
+            // EffectKit changes GL state. The host must rebind its display contract before draw.
+            host.restoreHostGlState();
+            if (texture.getTextureType() == NveTextureType.NV_OES_TEXTURE) {
+                host.drawOes(texture);
+            } else {
+                host.draw2D(texture);
+            }
+        } catch (RuntimeException error) {
+            host.onRenderError(-1);
+            host.restoreHostGlState();
+            host.drawRawInput();
+        } finally {
+            if (output != null) {
+                effectKit.recycleOutput(output);
+            }
+        }
+    }
+}

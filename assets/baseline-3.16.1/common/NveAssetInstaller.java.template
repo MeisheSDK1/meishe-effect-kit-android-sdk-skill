@@ -1,0 +1,59 @@
+package __TARGET_PACKAGE__;
+
+import android.os.Looper;
+import android.text.TextUtils;
+
+import com.meicam.sdk.NvsAssetPackageManager;
+import com.meishe.nveffectkit.utils.NveAssetPackageManagerUtil;
+
+import java.util.UUID;
+
+/**
+ * Baseline 3.16.1 package installer.
+ *
+ * Prepare paths and metadata on a resource worker, then call these methods on the Android main
+ * thread. The registered AAR reports Main Thread Checker violations when getInstance/package
+ * installation is reached from a background worker.
+ */
+final class NveAssetInstaller {
+    static String install(String packagePath, String packageLicensePath, int packageType) {
+        requireMainThread();
+        String packageId = NveAssetPackageManagerUtil.installFxPackage(
+                packagePath, packageLicensePath, packageType);
+        return isUsablePackageId(packageId) ? packageId : null;
+    }
+
+    static String installVideoFx(String packagePath, String packageLicensePath) {
+        return install(
+                packagePath,
+                packageLicensePath,
+                NvsAssetPackageManager.ASSET_PACKAGE_TYPE_VIDEOFX);
+    }
+
+    static String installArScene(String packagePath, String packageLicensePath) {
+        return install(
+                packagePath,
+                packageLicensePath,
+                NvsAssetPackageManager.ASSET_PACKAGE_TYPE_ARSCENE);
+    }
+
+    private static void requireMainThread() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            throw new IllegalStateException(
+                    "NveEffectKit 3.16.1 package installation must run on the main thread");
+        }
+    }
+
+    static boolean isUsablePackageId(String packageId) {
+        if (TextUtils.isEmpty(packageId)) {
+            return false;
+        }
+        try {
+            UUID uuid = UUID.fromString(packageId);
+            return uuid.getMostSignificantBits() != 0L
+                    || uuid.getLeastSignificantBits() != 0L;
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
+    }
+}

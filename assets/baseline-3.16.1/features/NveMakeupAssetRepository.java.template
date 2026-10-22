@@ -1,0 +1,211 @@
+package __TARGET_PACKAGE__;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Generation-safe makeup package installation.
+ *
+ * Build PackageSpec values from parsed, authorized metadata on a resource worker before calling
+ * this repository. For baseline 3.16.1, mainThreadExecutor must dispatch package installation to
+ * the Android main thread. Only the newest selection result is published on callbackExecutor.
+ * Consumers expose/apply an item only when Result.isComplete(). Duplicate package keys are
+ * installed once and cached only after this repository validates the returned package ID.
+ */
+final class NveMakeupAssetRepository {
+    interface Installer {
+        String install(String packagePath, String packageLicensePath, int packageType);
+    }
+
+    interface Listener {
+        void onInstalled(Result result);
+    }
+
+    static final class PackageSpec {
+        final String key;
+        final String packagePath;
+        final String packageLicensePath;
+        final int packageType;
+
+        PackageSpec(
+                String key,
+                String packagePath,
+                String packageLicensePath,
+                int packageType) {
+            if (key == null || key.trim().isEmpty()) {
+                throw new IllegalArgumentException("package key must not be empty");
+            }
+            this.key = key;
+            this.packagePath = packagePath;
+            this.packageLicensePath = packageLicensePath;
+            this.packageType = packageType;
+        }
+    }
+
+    static final class Selection {
+        final String itemId;
+        final List<PackageSpec> packages;
+
+        Selection(String itemId, List<PackageSpec> packages) {
+            if (itemId == null || itemId.trim().isEmpty()) {
+                throw new IllegalArgumentException("itemId must not be empty");
+            }
+            if (packages == null || packages.isEmpty()) {
+                throw new IllegalArgumentException("packages must not be empty");
+            }
+            this.itemId = itemId;
+            this.packages = Collections.unmodifiableList(
+                    new ArrayList<>(packages));
+        }
+    }
+
+    static final class Result {
+        final long generation;
+        final String itemId;
+        final Map<String, String> packageIds;
+        final List<String> failedPackageKeys;
+
+        private Result(
+                long generation,
+                String itemId,
+                Map<String, String> packageIds,
+                List<String> failedPackageKeys) {
+            this.generation = generation;
+            this.itemId = itemId;
+            this.packageIds = Collections.unmodifiableMap(
+                    new LinkedHashMap<>(packageIds));
+            this.failedPackageKeys = Collections.unmodifiableList(
+                    new ArrayList<>(failedPackageKeys));
+        }
+
+        boolean isComplete() {
+            return failedPackageKeys.isEmpty();
+        }
+    }
+
+    private final AtomicLong generation = new AtomicLong();
+    private final Map<String, String> installedPackageIds = new LinkedHashMap<>();
+    private final Map<String, PackageSpec> installedPackageSpecs = new LinkedHashMap<>();
+    private final Installer installer;
+
+    NveMakeupAssetRepository(Installer installer) {
+        if (installer == null) {
+            throw new IllegalArgumentException("installer must not be null");
+        }
+        this.installer = installer;
+    }
+
+    long installLatest(
+            Selection selection,
+            Executor mainThreadExecutor,
+            Executor callbackExecutor,
+            Listener listener) {
+        final long requestGeneration = generation.incrementAndGet();
+        mainThreadExecutor.execute(() -> {
+            Result result = install(requestGeneration, selection);
+            if (generation.get() != requestGeneration) {
+                return;
+            }
+            callbackExecutor.execute(() -> {
+                if (generation.get() == requestGeneration) {
+                    listener.onInstalled(result);
+                }
+            });
+        });
+        return requestGeneration;
+    }
+
+    void cancelPending() {
+        generation.incrementAndGet();
+    }
+
+    private Result install(long requestGeneration, Selection selection) {
+        Map<String, String> resolved = new LinkedHashMap<>();
+        List<String> failed = new ArrayList<>();
+        for (PackageSpec spec : uniquePackages(selection.packages).values()) {
+            String packageId = resolveInstalledPackage(spec);
+            if (packageId == null) {
+                failed.add(spec.key);
+            } else {
+                resolved.put(spec.key, packageId);
+            }
+        }
+        return new Result(
+                requestGeneration,
+                selection.itemId,
+                resolved,
+                failed);
+    }
+
+    private static Map<String, PackageSpec> uniquePackages(
+            List<PackageSpec> packages) {
+        Map<String, PackageSpec> result = new LinkedHashMap<>();
+        for (PackageSpec spec : packages) {
+            PackageSpec previous = result.put(spec.key, spec);
+            if (previous != null
+                    && (!same(previous.packagePath, spec.packagePath)
+                    || !same(previous.packageLicensePath, spec.packageLicensePath)
+                    || previous.packageType != spec.packageType)) {
+                throw new IllegalArgumentException(
+                        "duplicate package key has conflicting metadata: " + spec.key);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Serializes cache miss + install so concurrent selections cannot install the same key twice.
+     */
+    private synchronized String resolveInstalledPackage(PackageSpec spec) {
+        String packageId = installedPackageIds.get(spec.key);
+        if (packageId != null) {
+            PackageSpec installedSpec = installedPackageSpecs.get(spec.key);
+            if (!samePackage(installedSpec, spec)) {
+                throw new IllegalArgumentException(
+                        "package key was already installed with different metadata: "
+                                + spec.key);
+            }
+            return packageId;
+        }
+        packageId = installer.install(
+                spec.packagePath,
+                spec.packageLicensePath,
+                spec.packageType);
+        if (!isUsablePackageId(packageId)) {
+            return null;
+        }
+        installedPackageSpecs.put(spec.key, spec);
+        installedPackageIds.put(spec.key, packageId);
+        return packageId;
+    }
+
+    private static boolean same(String left, String right) {
+        return left == null ? right == null : left.equals(right);
+    }
+
+    private static boolean samePackage(PackageSpec left, PackageSpec right) {
+        return left != null
+                && same(left.packagePath, right.packagePath)
+                && same(left.packageLicensePath, right.packageLicensePath)
+                && left.packageType == right.packageType;
+    }
+
+    private static boolean isUsablePackageId(String packageId) {
+        if (packageId == null || packageId.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            UUID uuid = UUID.fromString(packageId);
+            return uuid.getMostSignificantBits() != 0L
+                    || uuid.getLeastSignificantBits() != 0L;
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
+    }
+}

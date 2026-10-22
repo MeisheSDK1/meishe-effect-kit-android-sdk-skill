@@ -1,0 +1,801 @@
+package __TARGET_PACKAGE__;
+
+import android.content.Context;
+import android.content.res.AssetManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.util.Log;
+
+import com.meicam.sdk.NvsAssetPackageManager;
+import com.meishe.nveffectkit.entity.BaseParam;
+import com.meishe.nveffectkit.entity.Filter;
+import com.meishe.nveffectkit.entity.Params;
+import com.meishe.nveffectkit.makeup.NveComposeMakeup;
+import com.meishe.nveffectkit.makeup.NveMakeupTypeEnum;
+import com.meishe.nveffectkit.makeup.NveSingleMakeUp;
+import com.meishe.nveffectkit.utils.ParseJsonFile;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Reads a supplied makeup catalog on a resource worker.
+ *
+ * The host supplies the assets root, metadata paths discovered by the build-time inspector, and
+ * the explicitly resolved material-license path. Directory names are not part of this contract.
+ * Package installation remains in NveMakeupAssetRepository on the Android main thread. Catalog
+ * UUIDs only locate and cross-check delivered files; installed package IDs remain runtime truth.
+ */
+final class NveMakeupResourceLoader {
+    private static final String TAG = "NveMakeupResources";
+
+    static final class SingleItem implements NveCompactMakeupPanelView.Item {
+        final String id;
+        final String label;
+        final NveMakeupTypeEnum type;
+        final String infoAssetPath;
+        final String packageAssetPath;
+        final String coverAssetPath;
+        final String packageKey;
+        Bitmap cover;
+
+        SingleItem(
+                String id,
+                String label,
+                NveMakeupTypeEnum type,
+                String infoAssetPath,
+                String packageAssetPath,
+                String coverAssetPath) {
+            this.id = id;
+            this.label = label;
+            this.type = type;
+            this.infoAssetPath = infoAssetPath;
+            this.packageAssetPath = packageAssetPath;
+            this.coverAssetPath = coverAssetPath;
+            packageKey = "single:" + id;
+        }
+
+        @Override
+        public String id() {
+            return id;
+        }
+
+        @Override
+        public String label() {
+            return label;
+        }
+
+        @Override
+        public NveMakeupTypeEnum type() {
+            return type;
+        }
+
+        @Override
+        public Bitmap cover() {
+            return cover;
+        }
+    }
+
+    static final class ComposeItem implements NveCompactMakeupPanelView.ComposeItem {
+        final String id;
+        final String label;
+        final String infoAssetPath;
+        final String assetDirectory;
+        final Set<NveMakeupTypeEnum> componentTypes;
+        Bitmap cover;
+
+        ComposeItem(
+                String id,
+                String label,
+                String infoAssetPath,
+                String assetDirectory,
+                Set<NveMakeupTypeEnum> componentTypes) {
+            this.id = id;
+            this.label = label;
+            this.infoAssetPath = infoAssetPath;
+            this.assetDirectory = assetDirectory;
+            this.componentTypes = componentTypes.isEmpty()
+                    ? Collections.emptySet()
+                    : Collections.unmodifiableSet(EnumSet.copyOf(componentTypes));
+        }
+
+        @Override
+        public String id() {
+            return id;
+        }
+
+        @Override
+        public String label() {
+            return label;
+        }
+
+        @Override
+        public Set<NveMakeupTypeEnum> componentTypes() {
+            return componentTypes;
+        }
+
+        @Override
+        public Bitmap cover() {
+            return cover;
+        }
+    }
+
+    static final class Catalog {
+        final List<SingleItem> singles;
+        final List<ComposeItem> composes;
+
+        Catalog(List<SingleItem> singles, List<ComposeItem> composes) {
+            this.singles = Collections.unmodifiableList(new ArrayList<>(singles));
+            this.composes = Collections.unmodifiableList(new ArrayList<>(composes));
+        }
+
+        List<NveCompactMakeupPanelView.Item> panelSingles() {
+            return new ArrayList<>(singles);
+        }
+
+        List<NveCompactMakeupPanelView.ComposeItem> panelComposes() {
+            return new ArrayList<>(composes);
+        }
+    }
+
+    static final class Prepared {
+        Catalog catalog;
+        final List<NveMakeupAssetRepository.PackageSpec> packages = new ArrayList<>();
+        final Map<String, NveSingleMakeUp> singles = new LinkedHashMap<>();
+        final Map<String, String> singlePackageKeys = new LinkedHashMap<>();
+        final Map<String, NveComposeMakeup> composes = new LinkedHashMap<>();
+        final Map<String, EnumMap<NveMakeupTypeEnum, NveSingleMakeUp>>
+                composeComponents = new LinkedHashMap<>();
+        final Map<String, EnumMap<NveMakeupTypeEnum, String>>
+                composeComponentKeys = new LinkedHashMap<>();
+        final Map<String, Set<String>> composePackageKeys = new LinkedHashMap<>();
+        final Map<String, Map<String, String>> composeUuidToKey = new LinkedHashMap<>();
+    }
+
+    static final class Installed {
+        final Map<String, NveSingleMakeUp> singles;
+        final Map<String, NveComposeMakeup> composes;
+        final Map<String, EnumMap<NveMakeupTypeEnum, NveSingleMakeUp>> composeComponents;
+        final Set<String> availableItemIds;
+
+        Installed(
+                Map<String, NveSingleMakeUp> singles,
+                Map<String, NveComposeMakeup> composes,
+                Map<String, EnumMap<NveMakeupTypeEnum, NveSingleMakeUp>>
+                        composeComponents,
+                Set<String> availableItemIds) {
+            this.singles = Collections.unmodifiableMap(new LinkedHashMap<>(singles));
+            this.composes = Collections.unmodifiableMap(new LinkedHashMap<>(composes));
+            this.composeComponents =
+                    Collections.unmodifiableMap(new LinkedHashMap<>(composeComponents));
+            this.availableItemIds =
+                    Collections.unmodifiableSet(new LinkedHashSet<>(availableItemIds));
+        }
+    }
+
+    private NveMakeupResourceLoader() {
+    }
+
+    static Prepared prepare(
+            Context context,
+            String assetRoot,
+            String singleIndexAssetPath,
+            List<String> composeMetadataAssetPaths,
+            String declaredPathPrefix,
+            String resolvedMaterialLicensePath,
+            Set<NveMakeupTypeEnum> selectedSingleTypes,
+            boolean includeCompose)
+            throws IOException, JSONException {
+        String root = normalizeAssetRoot(assetRoot);
+        if (selectedSingleTypes == null) {
+            throw new IllegalArgumentException("selectedSingleTypes is required");
+        }
+        if (composeMetadataAssetPaths == null) {
+            throw new IllegalArgumentException("composeMetadataAssetPaths is required");
+        }
+        Prepared result = new Prepared();
+        AssetManager assets = context.getAssets();
+        result.catalog = loadCatalog(
+                assets,
+                root,
+                singleIndexAssetPath,
+                composeMetadataAssetPaths,
+                declaredPathPrefix,
+                selectedSingleTypes,
+                includeCompose);
+        for (SingleItem item : result.catalog.singles) {
+            prepareSingle(assets, item, resolvedMaterialLicensePath, result);
+        }
+        for (ComposeItem item : result.catalog.composes) {
+            prepareCompose(assets, item, resolvedMaterialLicensePath, result);
+        }
+        return result;
+    }
+
+    static Installed resolveInstalled(
+            Prepared prepared,
+            NveMakeupAssetRepository.Result result,
+            boolean eyeballReady) {
+        Map<String, NveSingleMakeUp> singles = new LinkedHashMap<>();
+        Map<String, NveComposeMakeup> composes = new LinkedHashMap<>();
+        Map<String, EnumMap<NveMakeupTypeEnum, NveSingleMakeUp>>
+                composeComponents = new LinkedHashMap<>();
+        Set<String> available = new LinkedHashSet<>();
+
+        for (Map.Entry<String, NveSingleMakeUp> entry : prepared.singles.entrySet()) {
+            String packageId = result.packageIds.get(
+                    prepared.singlePackageKeys.get(entry.getKey()));
+            NveSingleMakeUp makeup = entry.getValue();
+            if (packageId == null
+                    || (makeup.getMakeupId().equals("Eyeball") && !eyeballReady)) {
+                continue;
+            }
+            makeup.setPackageID(packageId);
+            singles.put(entry.getKey(), makeup);
+            available.add(entry.getKey());
+        }
+
+        for (Map.Entry<String, NveComposeMakeup> entry : prepared.composes.entrySet()) {
+            String composeId = entry.getKey();
+            EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> components =
+                    prepared.composeComponents.get(composeId);
+            if ((components.containsKey(NveMakeupTypeEnum.Eyeball) && !eyeballReady)
+                    || !result.packageIds.keySet().containsAll(
+                    prepared.composePackageKeys.get(composeId))) {
+                continue;
+            }
+            EnumMap<NveMakeupTypeEnum, String> componentKeys =
+                    prepared.composeComponentKeys.get(composeId);
+            for (Map.Entry<NveMakeupTypeEnum, NveSingleMakeUp> component
+                    : components.entrySet()) {
+                component.getValue().setPackageID(
+                        result.packageIds.get(componentKeys.get(component.getKey())));
+            }
+            replaceComposePackageIds(
+                    entry.getValue(),
+                    prepared.composeUuidToKey.get(composeId),
+                    result.packageIds);
+            composes.put(composeId, entry.getValue());
+            composeComponents.put(composeId, new EnumMap<>(components));
+            available.add(composeId);
+        }
+        return new Installed(singles, composes, composeComponents, available);
+    }
+
+    private static Catalog loadCatalog(
+            AssetManager assets,
+            String root,
+            String singleIndexAssetPath,
+            List<String> composeMetadataAssetPaths,
+            String declaredPathPrefix,
+            Set<NveMakeupTypeEnum> selectedSingleTypes,
+            boolean includeCompose)
+            throws IOException, JSONException {
+        List<SingleItem> singles = new ArrayList<>();
+        JSONArray categories = new JSONArray();
+        if (!selectedSingleTypes.isEmpty()) {
+            if (singleIndexAssetPath == null || singleIndexAssetPath.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "singleIndexAssetPath is required for selected single makeup");
+            }
+            String singleCatalog =
+                    resolveConfiguredPath(root, singleIndexAssetPath);
+            categories = new JSONArray(readText(assets, singleCatalog));
+        }
+        for (int categoryIndex = 0;
+                categoryIndex < categories.length();
+                categoryIndex++) {
+            JSONObject category = categories.getJSONObject(categoryIndex);
+            NveMakeupTypeEnum expectedType = makeupType(category.getString("displayName"));
+            if (!selectedSingleTypes.contains(expectedType)) {
+                continue;
+            }
+            String itemCatalogPath =
+                    resolveDeliveredPath(
+                            root,
+                            declaredPathPrefix,
+                            category.getString("jsonPath"));
+            JSONArray items = new JSONArray(readText(assets, itemCatalogPath));
+            for (int itemIndex = 0; itemIndex < items.length(); itemIndex++) {
+                JSONObject item = items.getJSONObject(itemIndex);
+                String parentPath =
+                        resolveDeliveredPath(
+                                root,
+                                declaredPathPrefix,
+                                item.getString("parentPath"));
+                String infoPath = resolveDeliveredPath(
+                        root,
+                        declaredPathPrefix,
+                        item.getString("infoPath"));
+                JSONObject detail = new JSONObject(readText(assets, infoPath));
+                JSONArray args = detail.getJSONObject("effectContent")
+                        .getJSONArray("makeupArgs");
+                if (args.length() != 1) {
+                    throw new JSONException(
+                            "single makeup must contain exactly one argument: " + infoPath);
+                }
+                JSONObject argument = args.getJSONObject(0);
+                String id = argument.getString("uuid");
+                if (makeupType(argument.getString("type")) != expectedType
+                        || !expectedType.name().equals(detail.getString("makeupId"))) {
+                    throw new JSONException(
+                            "single makeup category/type mismatch: " + infoPath);
+                }
+                String packagePath = singlePackagePath(assets, parentPath);
+                if (!id.equals(packageUuid(packagePath))) {
+                    throw new JSONException(
+                            "single makeup UUID does not match package filename: " + infoPath);
+                }
+                singles.add(new SingleItem(
+                        id,
+                        item.getString("name"),
+                        expectedType,
+                        infoPath,
+                        packagePath,
+                        resolveDeliveredPath(
+                                root,
+                                declaredPathPrefix,
+                                item.getString("cover"))));
+            }
+        }
+
+        List<ComposeItem> composes = new ArrayList<>();
+        if (includeCompose) {
+            if (composeMetadataAssetPaths.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "composeMetadataAssetPaths is required when includeCompose is true");
+            }
+            for (String configuredPath : composeMetadataAssetPaths) {
+                String infoPath = resolveConfiguredPath(root, configuredPath);
+                int separator = infoPath.lastIndexOf('/');
+                if (separator <= 0) {
+                    throw new JSONException(
+                            "compose metadata must have a parent directory: " + infoPath);
+                }
+                String assetDirectory = infoPath.substring(0, separator);
+                JSONObject metadata = new JSONObject(readText(assets, infoPath));
+                String id = metadata.getString("uuid");
+                composes.add(new ComposeItem(
+                        id,
+                        localizedName(metadata),
+                        infoPath,
+                        assetDirectory,
+                        composeComponentTypes(metadata)));
+            }
+        }
+        return new Catalog(singles, composes);
+    }
+
+    private static void prepareSingle(
+            AssetManager assets,
+            SingleItem item,
+            String materialLicensePath,
+            Prepared prepared)
+            throws IOException, JSONException {
+        JSONObject metadata = new JSONObject(readText(assets, item.infoAssetPath));
+        JSONObject argument = metadata.getJSONObject("effectContent")
+                .getJSONArray("makeupArgs").getJSONObject(0);
+        requireAsset(assets, item.packageAssetPath);
+
+        NveSingleMakeUp single = new NveSingleMakeUp();
+        single.setClassName(metadata.getString("className"));
+        single.setMakeupId(metadata.getString("makeupId"));
+        single.setIntensity((float) argument.optDouble("value", 1.0));
+        item.cover = decodeCover(assets, item.coverAssetPath);
+        prepared.singles.put(item.id, single);
+        prepared.singlePackageKeys.put(item.id, item.packageKey);
+        prepared.packages.add(new NveMakeupAssetRepository.PackageSpec(
+                item.packageKey,
+                "assets:/" + item.packageAssetPath,
+                materialLicensePath,
+                NvsAssetPackageManager.ASSET_PACKAGE_TYPE_MAKEUP));
+    }
+
+    private static void prepareCompose(
+            AssetManager assets,
+            ComposeItem item,
+            String materialLicensePath,
+            Prepared prepared)
+            throws IOException, JSONException {
+        String json = readText(assets, item.infoAssetPath);
+        JSONObject metadata = new JSONObject(json);
+        NveComposeMakeup compose =
+                (NveComposeMakeup) ParseJsonFile.fromJson(json, NveComposeMakeup.class);
+        if (compose == null || compose.getEffectContent() == null) {
+            throw new JSONException("compose metadata cannot be parsed: " + item.id);
+        }
+        compose.setAssetsDirectory("assets:/" + item.assetDirectory + "/");
+
+        Map<String, String> packagePathByUuid = new HashMap<>();
+        for (String path : listFiles(assets, item.assetDirectory)) {
+            if (packageType(path) == -1) {
+                continue;
+            }
+            packagePathByUuid.put(packageUuid(path), path);
+        }
+
+        Map<String, String> uuidToKey = new LinkedHashMap<>();
+        Set<String> packageKeys = new LinkedHashSet<>();
+        for (String uuid : referencedComposePackages(metadata)) {
+            String path = packagePathByUuid.get(uuid);
+            if (path == null) {
+                throw new JSONException("compose package is missing: " + uuid);
+            }
+            String key = "compose:" + item.id + ":" + uuid;
+            uuidToKey.put(uuid, key);
+            packageKeys.add(key);
+            prepared.packages.add(new NveMakeupAssetRepository.PackageSpec(
+                    key,
+                    "assets:/" + path,
+                    materialLicensePath,
+                    packageType(path)));
+        }
+
+        EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> components =
+                new EnumMap<>(NveMakeupTypeEnum.class);
+        EnumMap<NveMakeupTypeEnum, String> componentKeys =
+                new EnumMap<>(NveMakeupTypeEnum.class);
+        JSONArray makeup = metadata.getJSONObject("effectContent")
+                .optJSONArray("makeup");
+        if (makeup != null) {
+            for (int index = 0; index < makeup.length(); index++) {
+                JSONObject component = makeup.getJSONObject(index);
+                NveMakeupTypeEnum type = makeupType(component.getString("type"));
+                JSONArray params = component.getJSONArray("params");
+                String uuid = stringParam(params, "Package Id");
+                String key = uuidToKey.get(uuid);
+                if (key == null) {
+                    throw new JSONException(
+                            "compose makeup package is not installed: " + uuid);
+                }
+                NveSingleMakeUp single = new NveSingleMakeUp();
+                single.setMakeupId(type.name());
+                single.setClassName(stringParamKey(params, "Package Id"));
+                single.setIntensity(
+                        (float) numberParam(params, "Intensity", 1.0));
+                components.put(type, single);
+                componentKeys.put(type, key);
+            }
+        }
+
+        String cover = metadata.optString("cover", "");
+        if (!cover.isEmpty()) {
+            item.cover = decodeCover(assets, item.assetDirectory + "/" + cover);
+            if (item.cover == null) {
+                Log.w(
+                        TAG,
+                        "Declared compose cover is unavailable; "
+                                + "keep the text fallback until metadata is explicitly corrected: "
+                                + cover);
+            }
+        }
+        prepared.composes.put(item.id, compose);
+        prepared.composeComponents.put(item.id, components);
+        prepared.composeComponentKeys.put(item.id, componentKeys);
+        prepared.composePackageKeys.put(item.id, packageKeys);
+        prepared.composeUuidToKey.put(item.id, uuidToKey);
+    }
+
+    private static Set<NveMakeupTypeEnum> composeComponentTypes(JSONObject metadata)
+            throws JSONException {
+        Set<NveMakeupTypeEnum> result = EnumSet.noneOf(NveMakeupTypeEnum.class);
+        JSONObject content = metadata.optJSONObject("effectContent");
+        JSONArray makeup = content == null ? null : content.optJSONArray("makeup");
+        if (makeup != null) {
+            for (int index = 0; index < makeup.length(); index++) {
+                result.add(makeupType(makeup.getJSONObject(index).getString("type")));
+            }
+        }
+        return result;
+    }
+
+    private static Set<String> referencedComposePackages(JSONObject root)
+            throws JSONException {
+        JSONObject content = root.getJSONObject("effectContent");
+        Set<String> result = new LinkedHashSet<>();
+        collectParamReferences(content.optJSONArray("makeup"), result);
+        collectParamReferences(content.optJSONArray("shape"), result);
+        collectParamReferences(content.optJSONArray("microShape"), result);
+        JSONArray filters = content.optJSONArray("filter");
+        if (filters != null) {
+            for (int index = 0; index < filters.length(); index++) {
+                String uuid = filters.getJSONObject(index).optString("uuid", "");
+                if (!uuid.isEmpty()) {
+                    result.add(uuid);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static void collectParamReferences(JSONArray entries, Set<String> output)
+            throws JSONException {
+        if (entries == null) {
+            return;
+        }
+        for (int index = 0; index < entries.length(); index++) {
+            JSONArray params = entries.getJSONObject(index).optJSONArray("params");
+            if (params == null) {
+                continue;
+            }
+            for (int paramIndex = 0; paramIndex < params.length(); paramIndex++) {
+                JSONObject param = params.getJSONObject(paramIndex);
+                if ("string".equals(param.optString("type"))
+                        && param.optString("key").contains("Package Id")) {
+                    output.add(param.getString("value"));
+                }
+            }
+        }
+    }
+
+    private static void replaceComposePackageIds(
+            NveComposeMakeup compose,
+            Map<String, String> uuidToKey,
+            Map<String, String> installedIds) {
+        patchBaseParams(compose.getEffectContent().getMakeup(), uuidToKey, installedIds);
+        patchBaseParams(compose.getEffectContent().getShape(), uuidToKey, installedIds);
+        patchBaseParams(compose.getEffectContent().getMicroShape(), uuidToKey, installedIds);
+        List<Filter> filters = compose.getEffectContent().getFilter();
+        if (filters != null) {
+            for (Filter filter : filters) {
+                String key = uuidToKey.get(filter.getUuid());
+                if (key != null && installedIds.containsKey(key)) {
+                    filter.setUuid(installedIds.get(key));
+                }
+            }
+        }
+    }
+
+    private static void patchBaseParams(
+            List<? extends BaseParam> values,
+            Map<String, String> uuidToKey,
+            Map<String, String> installedIds) {
+        if (values == null) {
+            return;
+        }
+        for (BaseParam value : values) {
+            if (value.getParams() == null) {
+                continue;
+            }
+            for (Params param : value.getParams()) {
+                if (!(param.getValue() instanceof String)) {
+                    continue;
+                }
+                String key = uuidToKey.get(param.getValue());
+                if (key != null && installedIds.containsKey(key)) {
+                    param.setValue(installedIds.get(key));
+                }
+            }
+        }
+    }
+
+    private static String normalizeAssetRoot(String value) {
+        if (value == null) {
+            throw new IllegalArgumentException("assetRoot is required");
+        }
+        String root = value.replace('\\', '/');
+        while (root.startsWith("/")) {
+            root = root.substring(1);
+        }
+        while (root.endsWith("/")) {
+            root = root.substring(0, root.length() - 1);
+        }
+        if (root.contains("../") || root.equals("..")) {
+            throw new IllegalArgumentException("assetRoot must stay inside APK assets");
+        }
+        return root;
+    }
+
+    private static String resolveConfiguredPath(String assetRoot, String configuredPath)
+            throws JSONException {
+        return joinAssetPath(assetRoot, normalizeRelativePath(configuredPath));
+    }
+
+    private static String resolveDeliveredPath(
+            String assetRoot,
+            String declaredPathPrefix,
+            String deliveredPath)
+            throws JSONException {
+        String value = normalizeRelativePath(deliveredPath);
+        String prefix = declaredPathPrefix == null || declaredPathPrefix.isEmpty()
+                ? ""
+                : normalizeRelativePath(declaredPathPrefix);
+        if (!prefix.isEmpty()) {
+            if (!value.equals(prefix) && !value.startsWith(prefix + "/")) {
+                throw new JSONException(
+                        "metadata path does not use declaredPathPrefix: " + deliveredPath);
+            }
+            value = value.equals(prefix) ? "" : value.substring(prefix.length() + 1);
+        }
+        if (value.isEmpty()) {
+            throw new JSONException(
+                    "metadata path resolves to the resource root: " + deliveredPath);
+        }
+        return joinAssetPath(assetRoot, value);
+    }
+
+    private static String normalizeRelativePath(String value)
+            throws JSONException {
+        if (value == null) {
+            throw new JSONException("asset path is required");
+        }
+        String normalized = value.replace('\\', '/');
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.isEmpty()
+                || normalized.equals("..")
+                || normalized.contains("../")
+                || normalized.contains("/./")) {
+            throw new JSONException("asset path must be safe and relative: " + value);
+        }
+        return normalized;
+    }
+
+    private static String joinAssetPath(String root, String relative) {
+        return root.isEmpty() ? relative : root + "/" + relative;
+    }
+
+    private static String singlePackagePath(AssetManager assets, String parentPath)
+            throws IOException, JSONException {
+        String found = null;
+        for (String path : listFiles(assets, parentPath)) {
+            if (!path.endsWith(".makeup")) {
+                continue;
+            }
+            if (found != null) {
+                throw new JSONException(
+                        "single makeup directory contains multiple packages: " + parentPath);
+            }
+            found = path;
+        }
+        if (found == null) {
+            throw new JSONException("single makeup package is missing: " + parentPath);
+        }
+        return found;
+    }
+
+    private static String packageUuid(String path) throws JSONException {
+        String filename = path.substring(path.lastIndexOf('/') + 1);
+        int separator = filename.indexOf('.');
+        if (separator <= 0) {
+            throw new JSONException("package filename has no UUID/version separator: " + path);
+        }
+        return filename.substring(0, separator);
+    }
+
+    private static String localizedName(JSONObject metadata) throws JSONException {
+        JSONArray translations = metadata.optJSONArray("translation");
+        if (translations != null) {
+            for (int index = 0; index < translations.length(); index++) {
+                JSONObject translation = translations.getJSONObject(index);
+                if ("zh_CN".equals(translation.optString("targetLanguage"))) {
+                    return translation.optString(
+                            "targetText", metadata.optString("name", "妆容"));
+                }
+            }
+        }
+        return metadata.optString("name", "妆容");
+    }
+
+    private static String readText(AssetManager assets, String path) throws IOException {
+        StringBuilder text = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(assets.open(path), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                text.append(line).append('\n');
+            }
+        }
+        return text.toString();
+    }
+
+    private static void requireAsset(AssetManager assets, String path) throws IOException {
+        try (InputStream ignored = assets.open(path)) {
+            // Opening is the validation; installation remains on the Android main thread.
+        }
+    }
+
+    private static Bitmap decodeCover(AssetManager assets, String path) {
+        try (InputStream stream = assets.open(path)) {
+            return BitmapFactory.decodeStream(stream);
+        } catch (IOException error) {
+            Log.w(TAG, "Unable to decode declared makeup cover: " + path);
+            return null;
+        }
+    }
+
+    private static List<String> listFiles(AssetManager assets, String path)
+            throws IOException {
+        List<String> result = new ArrayList<>();
+        String[] children = assets.list(path);
+        if (children == null || children.length == 0) {
+            result.add(path);
+            return result;
+        }
+        for (String child : children) {
+            result.addAll(listFiles(assets, path + "/" + child));
+        }
+        return result;
+    }
+
+    private static int packageType(String path) {
+        if (path.endsWith(".makeup")) {
+            return NvsAssetPackageManager.ASSET_PACKAGE_TYPE_MAKEUP;
+        }
+        if (path.endsWith(".facemesh")) {
+            return NvsAssetPackageManager.ASSET_PACKAGE_TYPE_FACE_MESH;
+        }
+        if (path.endsWith(".warp")) {
+            return NvsAssetPackageManager.ASSET_PACKAGE_TYPE_WARP;
+        }
+        if (path.endsWith(".videofx")) {
+            return NvsAssetPackageManager.ASSET_PACKAGE_TYPE_VIDEOFX;
+        }
+        return -1;
+    }
+
+    private static NveMakeupTypeEnum makeupType(String value) throws JSONException {
+        try {
+            return NveMakeupTypeEnum.valueOf(value);
+        } catch (IllegalArgumentException error) {
+            throw new JSONException("unsupported makeup type: " + value);
+        }
+    }
+
+    private static String stringParam(JSONArray params, String keySuffix)
+            throws JSONException {
+        for (int index = 0; index < params.length(); index++) {
+            JSONObject value = params.getJSONObject(index);
+            if (value.getString("key").endsWith(keySuffix)) {
+                return value.getString("value");
+            }
+        }
+        throw new JSONException("missing compose parameter: " + keySuffix);
+    }
+
+    private static String stringParamKey(JSONArray params, String keySuffix)
+            throws JSONException {
+        for (int index = 0; index < params.length(); index++) {
+            JSONObject value = params.getJSONObject(index);
+            if (value.getString("key").endsWith(keySuffix)) {
+                return value.getString("key");
+            }
+        }
+        throw new JSONException("missing compose parameter key: " + keySuffix);
+    }
+
+    private static double numberParam(
+            JSONArray params,
+            String keySuffix,
+            double fallback)
+            throws JSONException {
+        for (int index = 0; index < params.length(); index++) {
+            JSONObject value = params.getJSONObject(index);
+            if (value.getString("key").endsWith(keySuffix)) {
+                return value.getDouble("value");
+            }
+        }
+        return fallback;
+    }
+}

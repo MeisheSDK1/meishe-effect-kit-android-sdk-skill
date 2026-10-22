@@ -1,0 +1,286 @@
+package __TARGET_PACKAGE__;
+
+import android.opengl.GLES11Ext;
+import android.opengl.GLES20;
+import android.opengl.Matrix;
+import android.util.Log;
+
+import com.meishe.nveffectkit.render.NveSize;
+import com.meishe.nveffectkit.render.NveTexture;
+import com.meishe.nveffectkit.render.enumeration.NveTextureLayout;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+
+/**
+ * One display contract for raw camera OES, EffectKit OES output and EffectKit 2D output.
+ *
+ * The host owns the Surface/FBO. Target.bindDisplayTarget() must bind that exact destination;
+ * this class intentionally never assumes framebuffer 0.
+ */
+final class NveCamera2TexturePresenter
+        implements NveRenderBridge.HostGl, NveSessionOwner.HostGlResources {
+    interface Target {
+        void bindDisplayTarget();
+        int width();
+        int height();
+        void onRenderError(int errorCode);
+    }
+
+    private static final float[] QUAD = {
+            -1f, -1f, 0f, 0f,
+             1f, -1f, 1f, 0f,
+            -1f,  1f, 0f, 1f,
+             1f,  1f, 1f, 1f
+    };
+    private static final String VERTEX_SHADER =
+            "attribute vec2 aPosition;\n"
+                    + "attribute vec2 aTexCoord;\n"
+                    + "uniform mat4 uTexMatrix;\n"
+                    + "uniform vec2 uCrop;\n"
+                    + "varying vec2 vTexCoord;\n"
+                    + "void main() {\n"
+                    + "  gl_Position = vec4(aPosition, 0.0, 1.0);\n"
+                    + "  vec2 centered = (aTexCoord - vec2(0.5)) * uCrop + vec2(0.5);\n"
+                    + "  vTexCoord = (uTexMatrix * vec4(centered, 0.0, 1.0)).xy;\n"
+                    + "}\n";
+    private static final String OES_FRAGMENT_SHADER =
+            "#extension GL_OES_EGL_image_external : require\n"
+                    + "precision mediump float;\n"
+                    + "uniform samplerExternalOES uTexture;\n"
+                    + "varying vec2 vTexCoord;\n"
+                    + "void main() { gl_FragColor = texture2D(uTexture, vTexCoord); }\n";
+    private static final String TEXTURE_FRAGMENT_SHADER =
+            "precision mediump float;\n"
+                    + "uniform sampler2D uTexture;\n"
+                    + "varying vec2 vTexCoord;\n"
+                    + "void main() { gl_FragColor = texture2D(uTexture, vTexCoord); }\n";
+
+    private final Target target;
+    private final FloatBuffer quad;
+    private final float[] surfaceMatrix = new float[16];
+    private final float[] identityMatrix = new float[16];
+    private final float[] verticalFlipMatrix = new float[16];
+    private int oesProgram;
+    private int texture2dProgram;
+    private int rawOesTextureId;
+    private int rawDisplayWidth;
+    private int rawDisplayHeight;
+    private int lastTexture2dId;
+    private boolean reportedOesOutput;
+    private boolean reported2dOutput;
+
+    NveCamera2TexturePresenter(Target target) {
+        this.target = target;
+        quad = ByteBuffer.allocateDirect(QUAD.length * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer();
+        quad.put(QUAD).position(0);
+        Matrix.setIdentityM(surfaceMatrix, 0);
+        Matrix.setIdentityM(identityMatrix, 0);
+        Matrix.setIdentityM(verticalFlipMatrix, 0);
+        Matrix.translateM(verticalFlipMatrix, 0, 0f, 1f, 0f);
+        Matrix.scaleM(verticalFlipMatrix, 0, 1f, -1f, 1f);
+    }
+
+    /** Call once on the render GL thread after its EGLContext is current. */
+    void initializeOnGlThread() {
+        oesProgram = createProgram(VERTEX_SHADER, OES_FRAGMENT_SHADER);
+        texture2dProgram = createProgram(VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER);
+    }
+
+    /**
+     * Call after SurfaceTexture.updateTexImage/getTransformMatrix.
+     * cameraWidth/cameraHeight are camera-plane dimensions, not already-swapped display dimensions.
+     */
+    void updateRawInput(
+            int oesTextureId,
+            float[] transformMatrix,
+            int cameraWidth,
+            int cameraHeight,
+            int previewRotationDegrees) {
+        rawOesTextureId = oesTextureId;
+        System.arraycopy(transformMatrix, 0, surfaceMatrix, 0, 16);
+        boolean swap = NveCameraOrientation.swapsDimensions(previewRotationDegrees);
+        rawDisplayWidth = swap ? cameraHeight : cameraWidth;
+        rawDisplayHeight = swap ? cameraWidth : cameraHeight;
+    }
+
+    @Override
+    public void restoreHostGlState() {
+        target.bindDisplayTarget();
+        GLES20.glViewport(0, 0, target.width(), target.height());
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDisable(GLES20.GL_CULL_FACE);
+        GLES20.glColorMask(true, true, true, true);
+        GLES20.glDepthMask(true);
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
+        GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0);
+        GLES20.glBindRenderbuffer(GLES20.GL_RENDERBUFFER, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glUseProgram(0);
+    }
+
+    @Override
+    public void drawRawInput() {
+        if (!draw(oesProgram, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, rawOesTextureId,
+                surfaceMatrix, rawDisplayWidth, rawDisplayHeight)) {
+            target.onRenderError(-1);
+        }
+    }
+
+    @Override
+    public void drawOes(NveTexture texture) {
+        if (texture.getTextureId() != rawOesTextureId
+                && texture.getTextureId() == lastTexture2dId) {
+            // Registered 3.16.1 can transiently label the previous 2D texture name as OES while
+            // the master switch changes. A GL name cannot be sampled through both targets.
+            restoreHostGlState();
+            drawRawInput();
+            return;
+        }
+        NveSize size = texture.getSize();
+        if (!reportedOesOutput) {
+            reportedOesOutput = true;
+            Log.i("NveTexturePresenter", "NVE output type=OES size="
+                    + sizeText(size, rawDisplayWidth, rawDisplayHeight));
+        }
+        if (!draw(oesProgram, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture.getTextureId(),
+                surfaceMatrix,
+                size == null ? rawDisplayWidth : size.getWidth(),
+                size == null ? rawDisplayHeight : size.getHeight())) {
+            restoreHostGlState();
+            drawRawInput();
+        }
+    }
+
+    @Override
+    public void draw2D(NveTexture texture) {
+        lastTexture2dId = texture.getTextureId();
+        NveSize size = texture.getSize();
+        if (!reported2dOutput) {
+            reported2dOutput = true;
+            Log.i("NveTexturePresenter", "NVE output type=2D size="
+                    + sizeText(size, rawDisplayWidth, rawDisplayHeight));
+        }
+        float[] matrix = texture.isVerticalMirror()
+                || texture.getTextureLayout() == NveTextureLayout.UP_SIDE_DOWN
+                ? verticalFlipMatrix : identityMatrix;
+        if (!draw(texture2dProgram, GLES20.GL_TEXTURE_2D, texture.getTextureId(), matrix,
+                size == null ? rawDisplayWidth : size.getWidth(),
+                size == null ? rawDisplayHeight : size.getHeight())) {
+            restoreHostGlState();
+            drawRawInput();
+        }
+    }
+
+    @Override
+    public void onRenderError(int errorCode) {
+        target.onRenderError(errorCode);
+    }
+
+    @Override
+    public void releaseHostGlResources() {
+        if (oesProgram != 0) {
+            GLES20.glDeleteProgram(oesProgram);
+            oesProgram = 0;
+        }
+        if (texture2dProgram != 0) {
+            GLES20.glDeleteProgram(texture2dProgram);
+            texture2dProgram = 0;
+        }
+        rawOesTextureId = 0;
+        lastTexture2dId = 0;
+        reportedOesOutput = false;
+        reported2dOutput = false;
+    }
+
+    private static String sizeText(NveSize size, int fallbackWidth, int fallbackHeight) {
+        return size == null
+                ? fallbackWidth + "x" + fallbackHeight + " (fallback)"
+                : size.getWidth() + "x" + size.getHeight();
+    }
+
+    private boolean draw(
+            int program,
+            int textureTarget,
+            int textureId,
+            float[] matrix,
+            int sourceWidth,
+            int sourceHeight) {
+        int viewWidth = target.width();
+        int viewHeight = target.height();
+        if (program == 0 || textureId == 0 || viewWidth <= 0 || viewHeight <= 0
+                || sourceWidth <= 0 || sourceHeight <= 0 || !GLES20.glIsTexture(textureId)) {
+            return false;
+        }
+        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {
+            // Isolate the host draw result from EffectKit's internal GL operations.
+        }
+        float sourceAspect = (float) sourceWidth / sourceHeight;
+        float viewAspect = (float) viewWidth / viewHeight;
+        float cropX = sourceAspect > viewAspect ? viewAspect / sourceAspect : 1f;
+        float cropY = sourceAspect > viewAspect ? 1f : sourceAspect / viewAspect;
+
+        GLES20.glUseProgram(program);
+        int position = GLES20.glGetAttribLocation(program, "aPosition");
+        int texCoord = GLES20.glGetAttribLocation(program, "aTexCoord");
+        int texMatrix = GLES20.glGetUniformLocation(program, "uTexMatrix");
+        int crop = GLES20.glGetUniformLocation(program, "uCrop");
+        int sampler = GLES20.glGetUniformLocation(program, "uTexture");
+        quad.position(0);
+        GLES20.glEnableVertexAttribArray(position);
+        GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 16, quad);
+        quad.position(2);
+        GLES20.glEnableVertexAttribArray(texCoord);
+        GLES20.glVertexAttribPointer(texCoord, 2, GLES20.GL_FLOAT, false, 16, quad);
+        GLES20.glUniformMatrix4fv(texMatrix, 1, false, matrix, 0);
+        GLES20.glUniform2f(crop, cropX, cropY);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(textureTarget, textureId);
+        GLES20.glUniform1i(sampler, 0);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(position);
+        GLES20.glDisableVertexAttribArray(texCoord);
+        GLES20.glBindTexture(textureTarget, 0);
+        return GLES20.glGetError() == GLES20.GL_NO_ERROR;
+    }
+
+    private static int createProgram(String vertexSource, String fragmentSource) {
+        int vertex = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
+        int fragment = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
+        int program = GLES20.glCreateProgram();
+        GLES20.glAttachShader(program, vertex);
+        GLES20.glAttachShader(program, fragment);
+        GLES20.glLinkProgram(program);
+        int[] status = new int[1];
+        GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, status, 0);
+        GLES20.glDeleteShader(vertex);
+        GLES20.glDeleteShader(fragment);
+        if (status[0] == 0) {
+            String log = GLES20.glGetProgramInfoLog(program);
+            GLES20.glDeleteProgram(program);
+            throw new IllegalStateException("Unable to link GL program: " + log);
+        }
+        return program;
+    }
+
+    private static int compileShader(int type, String source) {
+        int shader = GLES20.glCreateShader(type);
+        GLES20.glShaderSource(shader, source);
+        GLES20.glCompileShader(shader);
+        int[] status = new int[1];
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0);
+        if (status[0] == 0) {
+            String log = GLES20.glGetShaderInfoLog(shader);
+            GLES20.glDeleteShader(shader);
+            throw new IllegalStateException("Unable to compile GL shader: " + log);
+        }
+        return shader;
+    }
+}

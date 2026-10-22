@@ -1,0 +1,126 @@
+package __TARGET_PACKAGE__;
+
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
+
+final class NveVideoRecordingConfig {
+    static final int DEFAULT_MAX_EDGE = 1280;
+    private static final int ALIGNMENT = 16;
+    private static final String AVC_MIME_TYPE = "video/avc";
+
+    static final class Dimensions {
+        final int width;
+        final int height;
+
+        Dimensions(int width, int height) {
+            this.width = width;
+            this.height = height;
+        }
+    }
+
+    private NveVideoRecordingConfig() {
+    }
+
+    static Dimensions fitInside(int sourceWidth, int sourceHeight, int maxEdge) {
+        if (sourceWidth <= 0 || sourceHeight <= 0 || maxEdge < ALIGNMENT) {
+            throw new IllegalArgumentException("Recording dimensions are invalid");
+        }
+        float scale = Math.min(
+                1f,
+                (float) maxEdge / Math.max(sourceWidth, sourceHeight));
+        int width = align(Math.round(sourceWidth * scale));
+        int height = align(Math.round(sourceHeight * scale));
+        return new Dimensions(width, height);
+    }
+
+    static int bitRate(int width, int height) {
+        long estimated = (long) width * height * 5L;
+        return (int) Math.max(2_000_000L, Math.min(12_000_000L, estimated));
+    }
+
+    static Dimensions fitSupported(int sourceWidth, int sourceHeight) {
+        int[] maximumEdges = {DEFAULT_MAX_EDGE, 960, 720, 640};
+        Dimensions fallback = fitInside(sourceWidth, sourceHeight, DEFAULT_MAX_EDGE);
+        for (int maximumEdge : maximumEdges) {
+            Dimensions candidate = fitInside(sourceWidth, sourceHeight, maximumEdge);
+            if (isAvcSizeSupported(candidate.width, candidate.height)) {
+                return candidate;
+            }
+        }
+        return fallback;
+    }
+
+    static int compatibleBitRate(int width, int height) {
+        int requested = bitRate(width, height);
+        try {
+            for (MediaCodecInfo codecInfo
+                    : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+                if (!codecInfo.isEncoder() || !supportsType(codecInfo, AVC_MIME_TYPE)) {
+                    continue;
+                }
+                MediaCodecInfo.VideoCapabilities videoCapabilities =
+                        codecInfo.getCapabilitiesForType(AVC_MIME_TYPE)
+                                .getVideoCapabilities();
+                if (videoCapabilities != null
+                        && videoCapabilities.isSizeSupported(width, height)) {
+                    return Math.max(
+                            videoCapabilities.getBitrateRange().getLower(),
+                            Math.min(
+                                    requested,
+                                    videoCapabilities.getBitrateRange().getUpper()));
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // MediaRecorder will report the authoritative configuration failure.
+        }
+        return requested;
+    }
+
+    private static int align(int value) {
+        return Math.max(ALIGNMENT, Math.round((float) value / ALIGNMENT) * ALIGNMENT);
+    }
+
+    private static boolean isAvcSizeSupported(int width, int height) {
+        try {
+            for (MediaCodecInfo codecInfo
+                    : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+                if (!codecInfo.isEncoder() || !supportsType(codecInfo, AVC_MIME_TYPE)) {
+                    continue;
+                }
+                MediaCodecInfo.CodecCapabilities capabilities =
+                        codecInfo.getCapabilitiesForType(AVC_MIME_TYPE);
+                boolean surfaceInput = false;
+                for (int colorFormat : capabilities.colorFormats) {
+                    if (colorFormat
+                            == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) {
+                        surfaceInput = true;
+                        break;
+                    }
+                }
+                MediaCodecInfo.VideoCapabilities videoCapabilities =
+                        capabilities.getVideoCapabilities();
+                if (surfaceInput
+                        && videoCapabilities != null
+                        && videoCapabilities.areSizeAndRateSupported(
+                                width,
+                                height,
+                                30.0)) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean supportsType(MediaCodecInfo codecInfo, String mimeType) {
+        for (String supportedType : codecInfo.getSupportedTypes()) {
+            if (mimeType.equalsIgnoreCase(supportedType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+

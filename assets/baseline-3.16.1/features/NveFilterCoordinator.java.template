@@ -1,0 +1,111 @@
+package __TARGET_PACKAGE__;
+
+import com.meishe.nveffectkit.NveEffectKit;
+import com.meishe.nveffectkit.filter.NveFilter;
+
+/** Single-selection packaged filter state; call only through the serial control thread. */
+final class NveFilterCoordinator {
+    interface Handle {
+        void setIntensity(float intensity);
+    }
+
+    interface Backend {
+        Handle add(String installedPackageId);
+        void remove(Handle handle);
+    }
+
+    private final Backend backend;
+    private Handle activeFilter;
+    private String desiredPackageId;
+    private float desiredIntensity = 0.5f;
+
+    NveFilterCoordinator(NveEffectKit effectKit) {
+        this(new Backend() {
+            @Override
+            public Handle add(String installedPackageId) {
+                NveFilter filter = new NveFilter(installedPackageId);
+                effectKit.addFilter(filter);
+                return new SdkHandle(filter);
+            }
+
+            @Override
+            public void remove(Handle handle) {
+                if (handle instanceof SdkHandle) {
+                    effectKit.removeFilter(((SdkHandle) handle).filter);
+                }
+            }
+        });
+    }
+
+    NveFilterCoordinator(Backend backend) {
+        this.backend = backend;
+    }
+
+    void select(String installedPackageId, float intensity) {
+        desiredIntensity = clamp01(intensity);
+        if (installedPackageId == null || installedPackageId.isEmpty()) {
+            clear();
+            return;
+        }
+        boolean samePackage = installedPackageId.equals(desiredPackageId);
+        desiredPackageId = installedPackageId;
+        if (!samePackage || activeFilter == null) {
+            removeActiveFilter();
+            activeFilter = backend.add(installedPackageId);
+        }
+        activeFilter.setIntensity(desiredIntensity);
+    }
+
+    void setIntensity(float intensity) {
+        desiredIntensity = clamp01(intensity);
+        if (activeFilter != null) {
+            activeFilter.setIntensity(desiredIntensity);
+        }
+    }
+
+    void clear() {
+        desiredPackageId = null;
+        removeActiveFilter();
+    }
+
+    /** EffectKit cleanUp invalidates the old handle; rebuild desired state after initialize(). */
+    void restoreAfterInitialize() {
+        activeFilter = null;
+        if (desiredPackageId != null) {
+            activeFilter = backend.add(desiredPackageId);
+            activeFilter.setIntensity(desiredIntensity);
+        }
+    }
+
+    boolean hasDesiredFilter() {
+        return desiredPackageId != null;
+    }
+
+    float desiredIntensity() {
+        return desiredIntensity;
+    }
+
+    private void removeActiveFilter() {
+        if (activeFilter != null) {
+            backend.remove(activeFilter);
+            activeFilter = null;
+        }
+    }
+
+    private static float clamp01(float value) {
+        return Math.max(0f, Math.min(1f, value));
+    }
+
+    private static final class SdkHandle implements Handle {
+        final NveFilter filter;
+
+        SdkHandle(NveFilter filter) {
+            this.filter = filter;
+        }
+
+        @Override
+        public void setIntensity(float intensity) {
+            filter.setFilterIntensity(intensity);
+        }
+    }
+}

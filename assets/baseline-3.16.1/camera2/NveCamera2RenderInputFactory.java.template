@@ -1,0 +1,65 @@
+package __TARGET_PACKAGE__;
+
+import com.meishe.nveffectkit.render.NveImageBuffer;
+import com.meishe.nveffectkit.render.NveRenderConfig;
+import com.meishe.nveffectkit.render.NveRenderInput;
+import com.meishe.nveffectkit.render.NveSize;
+import com.meishe.nveffectkit.render.NveTexture;
+import com.meishe.nveffectkit.render.enumeration.NveFormatType;
+import com.meishe.nveffectkit.render.enumeration.NveTextureType;
+
+/** Exact registered 3.16.1 Camera2 OES + NV21 metadata contract. */
+final class NveCamera2RenderInputFactory {
+    private NveCamera2RenderInputFactory() {
+    }
+
+    static NveRenderInput build(
+            int oesTextureId,
+            int cameraWidth,
+            int cameraHeight,
+            int sensorOrientation,
+            int displayRotationDegrees,
+            boolean frontCamera,
+            long oesTimestampNs,
+            NveCamera2FramePairer.Frame frame) {
+        if (oesTextureId <= 0 || cameraWidth <= 0 || cameraHeight <= 0 || frame == null) {
+            throw new IllegalArgumentException("Camera2 render input is incomplete");
+        }
+
+        int previewRotation = NveCameraOrientation.previewRotationDegrees(
+                sensorOrientation, displayRotationDegrees, frontCamera);
+        int textureWidth = NveCameraOrientation.swapsDimensions(previewRotation)
+                ? cameraHeight : cameraWidth;
+        int textureHeight = NveCameraOrientation.swapsDimensions(previewRotation)
+                ? cameraWidth : cameraHeight;
+
+        NveRenderConfig config = new NveRenderConfig()
+                .setRenderMode(NveRenderConfig.NveRenderMode.TEXTURE_TEXTURE)
+                .setCameraOrientation(sensorOrientation)
+                .build();
+
+        NveTexture texture = new NveTexture();
+        texture.setTextureId(oesTextureId);
+        texture.setTextureType(NveTextureType.NV_OES_TEXTURE);
+        texture.setSize(new NveSize(textureWidth, textureHeight));
+        texture.setOrientation(sensorOrientation);
+        texture.setMirror(frontCamera);
+        texture.setVerticalMirror(true);
+
+        NveImageBuffer imageBuffer = new NveImageBuffer();
+        imageBuffer.setData(frame.nv21);
+        imageBuffer.setSize(new NveSize(frame.width, frame.height));
+        imageBuffer.setDisplayRotation(previewRotation);
+        imageBuffer.setMirror(frontCamera);
+        imageBuffer.setRowPitchY(frame.width);
+        imageBuffer.setRowPitchUV(frame.width);
+
+        NveRenderInput input = new NveRenderInput();
+        input.setConfig(config);
+        input.setTexture(texture);
+        input.setImageBuffer(imageBuffer);
+        input.setPixelFormat(NveFormatType.VIDEO_FRAME_PIXEL_FROMAT_NV21.getType());
+        input.setRenderTimestamp(oesTimestampNs);
+        return input;
+    }
+}

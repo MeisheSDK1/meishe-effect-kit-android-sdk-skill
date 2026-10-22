@@ -1,0 +1,29 @@
+package __TARGET_PACKAGE__;
+
+/** Pure Camera2 sensor/display conversion used by the EffectKit detection buffer. */
+final class NveCameraOrientation {
+    private NveCameraOrientation() {
+    }
+
+    static int previewRotationDegrees(
+            int sensorOrientation,
+            int displayRotationDegrees,
+            boolean frontCamera) {
+        int sensor = normalize(sensorOrientation);
+        int display = normalize(displayRotationDegrees);
+        if (frontCamera) {
+            return normalize(360 - normalize(sensor + display));
+        }
+        return normalize(sensor - display);
+    }
+
+    static boolean swapsDimensions(int rotationDegrees) {
+        int rotation = normalize(rotationDegrees);
+        return rotation == 90 || rotation == 270;
+    }
+
+    private static int normalize(int degrees) {
+        int normalized = degrees % 360;
+        return normalized < 0 ? normalized + 360 : normalized;
+    }
+}

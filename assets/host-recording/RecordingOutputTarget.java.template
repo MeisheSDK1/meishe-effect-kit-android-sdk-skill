@@ -1,0 +1,224 @@
+package __TARGET_PACKAGE__;
+
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.Context;
+import android.media.MediaRecorder;
+import android.media.MediaScannerConnection;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.os.ParcelFileDescriptor;
+import android.os.StatFs;
+import android.provider.MediaStore;
+
+import java.io.Closeable;
+import java.io.File;
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+
+/**
+ * Owns one recording destination from creation through publish/rollback.
+ *
+ * Android 10+ records directly into a pending MediaStore item. Older releases record directly
+ * into the public camera directory and trigger a media scan after the encoder is finalized.
+ */
+public final class RecordingOutputTarget implements Closeable {
+    private static final String MIME_TYPE = "video/mp4";
+    private static final String CAMERA_DIRECTORY = "Camera";
+    private static final long MIN_FREE_BYTES = 64L * 1024L * 1024L;
+
+    private final Context appContext;
+    private final String displayName;
+    private final Uri mediaStoreUri;
+    private final File legacyFile;
+    private ParcelFileDescriptor descriptor;
+    private boolean finished;
+
+    private RecordingOutputTarget(
+            Context appContext,
+            String displayName,
+            Uri mediaStoreUri,
+            ParcelFileDescriptor descriptor,
+            File legacyFile) {
+        this.appContext = appContext;
+        this.displayName = displayName;
+        this.mediaStoreUri = mediaStoreUri;
+        this.descriptor = descriptor;
+        this.legacyFile = legacyFile;
+    }
+
+    public static RecordingOutputTarget create(Context context) throws IOException {
+        Context appContext = context.getApplicationContext();
+        if (!hasEnoughSpace()) {
+            throw new IOException("手机存储空间不足");
+        }
+        String displayName = "NVE_" + new SimpleDateFormat(
+                "yyyyMMdd_HHmmss_SSS",
+                Locale.US).format(new Date()) + ".mp4";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return createMediaStoreTarget(appContext, displayName);
+        }
+        return createLegacyTarget(appContext, displayName);
+    }
+
+    public String displayName() {
+        return displayName;
+    }
+
+    public void configure(MediaRecorder recorder) {
+        if (descriptor != null) {
+            recorder.setOutputFile(descriptor.getFileDescriptor());
+        } else if (legacyFile != null) {
+            recorder.setOutputFile(legacyFile.getAbsolutePath());
+        } else {
+            throw new IllegalStateException("Recording output is no longer available");
+        }
+    }
+
+    public synchronized Uri finish() throws IOException {
+        if (finished) {
+            return mediaStoreUri != null ? mediaStoreUri : Uri.fromFile(legacyFile);
+        }
+        closeDescriptor();
+        if (mediaStoreUri != null) {
+            ContentValues ready = new ContentValues();
+            ready.put(MediaStore.Video.Media.IS_PENDING, 0);
+            int updated = appContext.getContentResolver().update(
+                    mediaStoreUri,
+                    ready,
+                    null,
+                    null);
+            if (updated <= 0) {
+                throw new IOException("无法发布相册视频");
+            }
+            finished = true;
+            return mediaStoreUri;
+        }
+        if (legacyFile == null || !legacyFile.isFile() || legacyFile.length() == 0L) {
+            throw new IOException("录制文件无效");
+        }
+        MediaScannerConnection.scanFile(
+                appContext,
+                new String[]{legacyFile.getAbsolutePath()},
+                new String[]{MIME_TYPE},
+                null);
+        finished = true;
+        return Uri.fromFile(legacyFile);
+    }
+
+    public synchronized void abort() {
+        if (finished) {
+            return;
+        }
+        closeDescriptorQuietly();
+        if (mediaStoreUri != null) {
+            appContext.getContentResolver().delete(mediaStoreUri, null, null);
+        } else if (legacyFile != null && legacyFile.exists() && !legacyFile.delete()) {
+            legacyFile.deleteOnExit();
+        }
+        finished = true;
+    }
+
+    @Override
+    public synchronized void close() {
+        if (!finished) {
+            abort();
+        } else {
+            closeDescriptorQuietly();
+        }
+    }
+
+    private static RecordingOutputTarget createMediaStoreTarget(
+            Context context,
+            String displayName) throws IOException {
+        ContentResolver resolver = context.getContentResolver();
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Video.Media.DISPLAY_NAME, displayName);
+        values.put(MediaStore.Video.Media.MIME_TYPE, MIME_TYPE);
+        values.put(
+                MediaStore.Video.Media.RELATIVE_PATH,
+                Environment.DIRECTORY_DCIM + "/" + CAMERA_DIRECTORY);
+        values.put(MediaStore.Video.Media.IS_PENDING, 1);
+        Uri uri = resolver.insert(
+                MediaStore.Video.Media.getContentUri(
+                        MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                values);
+        if (uri == null) {
+            throw new IOException("无法创建相册视频");
+        }
+        ParcelFileDescriptor descriptor = null;
+        try {
+            descriptor = resolver.openFileDescriptor(uri, "rw");
+            if (descriptor == null) {
+                throw new IOException("无法打开相册视频");
+            }
+            return new RecordingOutputTarget(
+                    context,
+                    displayName,
+                    uri,
+                    descriptor,
+                    null);
+        } catch (IOException | RuntimeException error) {
+            if (descriptor != null) {
+                try {
+                    descriptor.close();
+                } catch (IOException ignored) {
+                    // The MediaStore row is removed below.
+                }
+            }
+            resolver.delete(uri, null, null);
+            if (error instanceof IOException) {
+                throw (IOException) error;
+            }
+            throw new IOException("无法打开相册视频", error);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static RecordingOutputTarget createLegacyTarget(
+            Context context,
+            String displayName) throws IOException {
+        File dcim = Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DCIM);
+        File album = new File(dcim, CAMERA_DIRECTORY);
+        if (!album.isDirectory() && !album.mkdirs()) {
+            throw new IOException("无法创建相册目录");
+        }
+        return new RecordingOutputTarget(
+                context,
+                displayName,
+                null,
+                null,
+                new File(album, displayName));
+    }
+
+    private static boolean hasEnoughSpace() {
+        try {
+            StatFs statFs = new StatFs(Environment.getExternalStorageDirectory().getPath());
+            return statFs.getAvailableBytes() >= MIN_FREE_BYTES;
+        } catch (RuntimeException ignored) {
+            // Let MediaStore/MediaRecorder provide the authoritative failure when stats are hidden.
+            return true;
+        }
+    }
+
+    private void closeDescriptor() throws IOException {
+        ParcelFileDescriptor openDescriptor = descriptor;
+        descriptor = null;
+        if (openDescriptor != null) {
+            openDescriptor.close();
+        }
+    }
+
+    private void closeDescriptorQuietly() {
+        try {
+            closeDescriptor();
+        } catch (IOException ignored) {
+            // Cleanup remains best effort.
+        }
+    }
+}
+

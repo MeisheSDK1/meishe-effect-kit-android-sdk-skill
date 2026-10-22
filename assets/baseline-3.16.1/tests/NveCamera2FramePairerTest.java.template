@@ -1,0 +1,72 @@
+package __TARGET_PACKAGE__;
+
+import org.junit.Test;
+
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+
+public class NveCamera2FramePairerTest {
+    private static final int GENERATION = 7;
+
+    @Test
+    public void convertedFrameCanBeReusedForNearbyOesFrames() {
+        NveCamera2FramePairer pairer = new NveCamera2FramePairer();
+        NveCamera2FramePairer.Frame frame = frameAt(1_000_000_000L, GENERATION);
+        pairer.publishConvertedFrame(frame);
+
+        assertTrue(pairer.hasFrame(GENERATION));
+        NveCamera2FramePairer.Frame first =
+                pairer.pairedFrame(1_010_000_000L, GENERATION);
+        NveCamera2FramePairer.Frame second =
+                pairer.pairedFrame(1_020_000_000L, GENERATION);
+        assertSame(frame, first);
+        assertSame(frame, second);
+        assertTrue(pairer.hasFrame(GENERATION));
+        pairer.releaseFrame(first);
+        pairer.releaseFrame(second);
+    }
+
+    @Test
+    public void staleDetectionBehindOesIsDiscarded() {
+        NveCamera2FramePairer pairer = new NveCamera2FramePairer();
+        pairer.publishConvertedFrame(frameAt(1_000_000_000L, GENERATION));
+
+        assertNull(pairer.pairedFrame(
+                1_000_000_000L + NveCamera2FramePairer.MAX_PAIR_AGE_NS + 1L,
+                GENERATION));
+        assertFalse(pairer.hasFrame(GENERATION));
+    }
+
+    @Test
+    public void futureDetectionIsRetainedForNextOesFrame() {
+        NveCamera2FramePairer pairer = new NveCamera2FramePairer();
+        NveCamera2FramePairer.Frame frame =
+                frameAt(1_000_000_000L + NveCamera2FramePairer.MAX_PAIR_AGE_NS + 1L,
+                        GENERATION);
+        pairer.publishConvertedFrame(frame);
+
+        assertNull(pairer.pairedFrame(1_000_000_000L, GENERATION));
+        assertTrue(pairer.hasFrame(GENERATION));
+        NveCamera2FramePairer.Frame paired =
+                pairer.pairedFrame(1_010_000_000L, GENERATION);
+        assertSame(frame, paired);
+        pairer.releaseFrame(paired);
+    }
+
+    @Test
+    public void cameraGenerationMismatchCannotPair() {
+        NveCamera2FramePairer pairer = new NveCamera2FramePairer();
+        pairer.publishConvertedFrame(frameAt(1_000_000_000L, GENERATION - 1));
+
+        assertFalse(pairer.hasFrame(GENERATION));
+        assertNull(pairer.pairedFrame(1_000_000_000L, GENERATION));
+        assertFalse(pairer.hasFrame(GENERATION));
+    }
+
+    private static NveCamera2FramePairer.Frame frameAt(long timestampNs, int generation) {
+        return new NveCamera2FramePairer.Frame(
+                new byte[] {0, 1, 2}, 2, 2, timestampNs, generation);
+    }
+}

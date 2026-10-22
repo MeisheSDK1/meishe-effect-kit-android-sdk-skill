@@ -1,0 +1,84 @@
+package __TARGET_PACKAGE__;
+
+import org.junit.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+public class NveFilterCoordinatorTest {
+    @Test
+    public void selectionIsSingleAndClearRemovesActiveFilter() {
+        FakeBackend backend = new FakeBackend();
+        NveFilterCoordinator coordinator = new NveFilterCoordinator(backend);
+
+        coordinator.select("filter-a", 0.5f);
+        coordinator.select("filter-b", 0.8f);
+
+        assertEquals(2, backend.addedPackageIds.size());
+        assertEquals(1, backend.removeCount);
+        assertTrue(coordinator.hasDesiredFilter());
+        assertEquals(0.8f, coordinator.desiredIntensity(), 0.0001f);
+
+        coordinator.clear();
+
+        assertEquals(2, backend.removeCount);
+        assertFalse(coordinator.hasDesiredFilter());
+    }
+
+    @Test
+    public void intensityIsClampedAndSameSelectionDoesNotRecreateFilter() {
+        FakeBackend backend = new FakeBackend();
+        NveFilterCoordinator coordinator = new NveFilterCoordinator(backend);
+
+        coordinator.select("filter-a", 2f);
+        coordinator.select("filter-a", -1f);
+
+        assertEquals(1, backend.addedPackageIds.size());
+        assertEquals(0, backend.removeCount);
+        assertEquals(0f, coordinator.desiredIntensity(), 0.0001f);
+        assertEquals(0f, backend.lastHandle.intensity, 0.0001f);
+    }
+
+    @Test
+    public void initializeRestoresDesiredFilterAndIntensity() {
+        FakeBackend backend = new FakeBackend();
+        NveFilterCoordinator coordinator = new NveFilterCoordinator(backend);
+        coordinator.select("filter-a", 0.65f);
+
+        coordinator.restoreAfterInitialize();
+
+        assertEquals(2, backend.addedPackageIds.size());
+        assertEquals(0.65f, backend.lastHandle.intensity, 0.0001f);
+    }
+
+    private static final class FakeBackend implements NveFilterCoordinator.Backend {
+        final List<String> addedPackageIds = new ArrayList<>();
+        int removeCount;
+        FakeHandle lastHandle;
+
+        @Override
+        public NveFilterCoordinator.Handle add(String installedPackageId) {
+            addedPackageIds.add(installedPackageId);
+            lastHandle = new FakeHandle();
+            return lastHandle;
+        }
+
+        @Override
+        public void remove(NveFilterCoordinator.Handle handle) {
+            removeCount++;
+        }
+    }
+
+    private static final class FakeHandle implements NveFilterCoordinator.Handle {
+        float intensity;
+
+        @Override
+        public void setIntensity(float intensity) {
+            this.intensity = intensity;
+        }
+    }
+}

@@ -1,0 +1,38 @@
+package __TARGET_PACKAGE__;
+
+import org.junit.Test;
+
+import java.util.Map;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
+public class NveLatestValueQueueTest {
+    @Test
+    public void repeatedValuesForOneFeatureCollapseToLatestValue() {
+        NveLatestValueQueue<String, Float> queue = new NveLatestValueQueue<>();
+
+        queue.offer("skin:buffing-skin", 0.1f);
+        queue.offer("skin:buffing-skin", 0.4f);
+        queue.offer("skin:buffing-skin", 0.8f);
+
+        Map<String, Float> drained = queue.drain();
+        assertEquals(1, drained.size());
+        assertEquals(0.8f, drained.get("skin:buffing-skin"), 0.0001f);
+        assertTrue(queue.drain().isEmpty());
+    }
+
+    @Test
+    public void differentFeaturesKeepIndependentLatestValues() {
+        NveLatestValueQueue<String, Float> queue = new NveLatestValueQueue<>();
+
+        queue.offer("skin:buffing-skin", 0.3f);
+        queue.offer("shape:face-width", -0.2f);
+        queue.offer("skin:buffing-skin", 0.6f);
+
+        Map<String, Float> drained = queue.drain();
+        assertEquals(2, drained.size());
+        assertEquals(0.6f, drained.get("skin:buffing-skin"), 0.0001f);
+        assertEquals(-0.2f, drained.get("shape:face-width"), 0.0001f);
+    }
+}

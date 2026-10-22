@@ -1,0 +1,26 @@
+package __TARGET_PACKAGE__;
+
+interface NveFinalTextureFrameSink {
+    interface Renderer {
+        boolean drawToCurrentSurface(
+                int textureTarget,
+                int textureId,
+                float[] textureMatrix,
+                int sourceWidth,
+                int sourceHeight,
+                int targetWidth,
+                int targetHeight);
+
+        void restoreHostGlState();
+    }
+
+    void onFrame(
+            Renderer renderer,
+            int textureTarget,
+            int textureId,
+            float[] textureMatrix,
+            int sourceWidth,
+            int sourceHeight,
+            long timestampNs);
+}
+

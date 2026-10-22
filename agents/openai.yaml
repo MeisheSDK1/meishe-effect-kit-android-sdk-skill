@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meishe Effect Kit Android"
+  short_description: "接入、排障并验证 Android NveEffectKit 特效与最终输出录制"
+  default_prompt: "使用 $meishe-effect-kit-android 在现有 Android 工程中接入并验证指定特效，或把该工程现有 NVE 管线的最终输出纹理录制到系统相册。"

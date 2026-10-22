@@ -1,0 +1,235 @@
+package __TARGET_PACKAGE__;
+
+import android.media.Image;
+
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+/**
+ * Bounded latest-frame handoff for Camera2 OES + reusable NV21 buffers.
+ *
+ * The Image callback transfers Image ownership here. A single worker converts the latest Image
+ * directly into a pooled NV21 buffer and closes it. The GL thread may reuse a recent detection
+ * frame for multiple OES frames; reference counting prevents a retired buffer from returning to
+ * the pool until SDK rendering finishes with it.
+ */
+final class NveCamera2FramePairer {
+    static final long MAX_PAIR_AGE_NS = 100_000_000L;
+
+    static final class Frame {
+        final byte[] nv21;
+        final int width;
+        final int height;
+        final long timestampNs;
+        final int generation;
+        private final boolean recyclable;
+        private final AtomicInteger readers = new AtomicInteger();
+        private final AtomicBoolean recycled = new AtomicBoolean();
+        private volatile boolean retired;
+
+        Frame(byte[] nv21, int width, int height, long timestampNs, int generation) {
+            this(nv21, width, height, timestampNs, generation, false);
+        }
+
+        Frame(
+                byte[] nv21,
+                int width,
+                int height,
+                long timestampNs,
+                int generation,
+                boolean recyclable) {
+            this.nv21 = nv21;
+            this.width = width;
+            this.height = height;
+            this.timestampNs = timestampNs;
+            this.generation = generation;
+            this.recyclable = recyclable;
+        }
+    }
+
+    private static final class PendingImage {
+        final Image image;
+        final int generation;
+
+        PendingImage(Image image, int generation) {
+            this.image = image;
+            this.generation = generation;
+        }
+    }
+
+    private final AtomicReference<PendingImage> pendingImage = new AtomicReference<>();
+    private final AtomicReference<Frame> latestFrame = new AtomicReference<>();
+    private final ConcurrentLinkedQueue<byte[]> availableBuffers =
+            new ConcurrentLinkedQueue<>();
+    private final Object conversionLock = new Object();
+
+    /**
+     * Call directly from ImageReader.OnImageAvailableListener with acquireLatestImage().
+     * Ownership transfers to this pairer; callers must not close the Image after this call.
+     */
+    void offerLatestImage(Image image, int generation) {
+        if (image == null) {
+            return;
+        }
+        PendingImage previous =
+                pendingImage.getAndSet(new PendingImage(image, generation));
+        if (previous != null) {
+            previous.image.close();
+        }
+    }
+
+    /** Call from one reusable background worker. Multiple callbacks collapse to the latest Image. */
+    boolean convertLatestImage() {
+        synchronized (conversionLock) {
+            PendingImage pending = pendingImage.getAndSet(null);
+            if (pending == null) {
+                return false;
+            }
+
+            Image image = pending.image;
+            byte[] output = null;
+            boolean published = false;
+            try {
+                int width = image.getWidth();
+                int height = image.getHeight();
+                int outputSize = NveNv21Converter.requiredBufferSize(width, height);
+                if (outputSize == 0) {
+                    return false;
+                }
+                output = acquireBuffer(outputSize);
+                if (!NveNv21Converter.convert(image, output)) {
+                    return false;
+                }
+                publishConvertedFrame(new Frame(
+                        output,
+                        width,
+                        height,
+                        image.getTimestamp(),
+                        pending.generation,
+                        true));
+                published = true;
+                return true;
+            } catch (RuntimeException ignored) {
+                return false;
+            } finally {
+                image.close();
+                if (!published && output != null) {
+                    availableBuffers.offer(output);
+                }
+            }
+        }
+    }
+
+    boolean hasPendingImage() {
+        return pendingImage.get() != null;
+    }
+
+    boolean hasFrame(int generation) {
+        Frame frame = latestFrame.get();
+        return frame != null && frame.generation == generation;
+    }
+
+    /**
+     * Returns a retained same-generation, near-timestamp detection frame.
+     *
+     * A recent detection buffer may be reused for more than one OES frame. This keeps the preview
+     * moving at camera cadence when YUV conversion arrives slightly later than SurfaceTexture.
+     * Call releaseFrame() in the render path's finally block after SDK rendering returns.
+     */
+    Frame pairedFrame(long oesTimestampNs, int generation) {
+        while (true) {
+            Frame frame = latestFrame.get();
+            if (frame == null) {
+                return null;
+            }
+            if (frame.generation != generation) {
+                if (latestFrame.compareAndSet(frame, null)) {
+                    retireFrame(frame);
+                }
+                continue;
+            }
+            if (oesTimestampNs <= 0L) {
+                return null;
+            }
+
+            long timestampDeltaNs = frame.timestampNs - oesTimestampNs;
+            if (Math.abs(timestampDeltaNs) > MAX_PAIR_AGE_NS) {
+                if (timestampDeltaNs < 0L) {
+                    if (latestFrame.compareAndSet(frame, null)) {
+                        retireFrame(frame);
+                    }
+                }
+                return null;
+            }
+            frame.readers.incrementAndGet();
+            if (latestFrame.get() == frame && !frame.retired) {
+                return frame;
+            }
+            releaseFrame(frame);
+        }
+    }
+
+    void releaseFrame(Frame frame) {
+        if (frame == null) {
+            return;
+        }
+        int remaining = frame.readers.decrementAndGet();
+        if (remaining < 0) {
+            throw new IllegalStateException("Frame released without a matching acquire");
+        }
+        if (remaining == 0 && frame.retired) {
+            recycleFrameBuffer(frame);
+        }
+    }
+
+    /**
+     * Serialize this call with ImageReader acquire/close. It waits for any active conversion,
+     * closes pending Images and retires the published buffer without recycling in-use data.
+     */
+    void reset() {
+        synchronized (conversionLock) {
+            PendingImage pending = pendingImage.getAndSet(null);
+            if (pending != null) {
+                pending.image.close();
+            }
+            Frame frame = latestFrame.getAndSet(null);
+            if (frame != null) {
+                retireFrame(frame);
+            }
+        }
+    }
+
+    void publishConvertedFrame(Frame frame) {
+        Frame previous = latestFrame.getAndSet(frame);
+        if (previous != null && previous != frame) {
+            retireFrame(previous);
+        }
+    }
+
+    private byte[] acquireBuffer(int requiredSize) {
+        byte[] candidate;
+        while ((candidate = availableBuffers.poll()) != null) {
+            if (candidate.length == requiredSize) {
+                return candidate;
+            }
+        }
+        return new byte[requiredSize];
+    }
+
+    private void retireFrame(Frame frame) {
+        frame.retired = true;
+        if (frame.readers.get() == 0) {
+            recycleFrameBuffer(frame);
+        }
+    }
+
+    private void recycleFrameBuffer(Frame frame) {
+        if (frame.recyclable
+                && frame.nv21 != null
+                && frame.recycled.compareAndSet(false, true)) {
+            availableBuffers.offer(frame.nv21);
+        }
+    }
+}

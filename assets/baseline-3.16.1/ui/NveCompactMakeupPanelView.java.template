@@ -1,0 +1,521 @@
+package __TARGET_PACKAGE__;
+
+import android.content.Context;
+import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+
+import com.meishe.nveffectkit.makeup.NveMakeupTypeEnum;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * Default compact Views panel for compose makeup and registered single-makeup categories.
+ *
+ * The host owns NveMakeupSelectionState across configuration changes and serializes SDK writes
+ * through Listener. This panel never derives compose selection from the current SDK object.
+ */
+final class NveCompactMakeupPanelView extends FrameLayout
+        implements NveCompactEffectEntryBar.Panel {
+    interface Item {
+        String id();
+        String label();
+        NveMakeupTypeEnum type();
+        Bitmap cover();
+    }
+
+    interface ComposeItem {
+        String id();
+        String label();
+        Set<NveMakeupTypeEnum> componentTypes();
+        Bitmap cover();
+    }
+
+    interface Listener {
+        void onSingleSelected(NveMakeupTypeEnum type, String itemId);
+        void onComposeSelected(String itemId);
+    }
+
+    private static final int COLOR_PANEL = 0xF21B1B24;
+    private static final int COLOR_SURFACE = 0xFF2A2A36;
+    private static final int COLOR_ACCENT = 0xFFFF6F9F;
+    private static final int COLOR_TEXT_PRIMARY = 0xFFFFFFFF;
+    private static final int COLOR_TEXT_SECONDARY = 0xFFB8B8C6;
+    private static final int COLOR_OUTLINE = 0x3DFFFFFF;
+
+    private static final Category[] ALL_SINGLE_CATEGORIES = {
+            new Category("lip", "口红", NveMakeupTypeEnum.Lip),
+            new Category("eyebrow", "眉毛", NveMakeupTypeEnum.Eyebrow),
+            new Category("eyeshadow", "眼影", NveMakeupTypeEnum.Eyeshadow),
+            new Category("eyelash", "睫毛", NveMakeupTypeEnum.Eyelash),
+            new Category("eyeliner", "眼线", NveMakeupTypeEnum.Eyeliner),
+            new Category("blusher", "腮红", NveMakeupTypeEnum.Blusher),
+            new Category("shadow", "修容", NveMakeupTypeEnum.Shadow),
+            new Category("brighten", "高光", NveMakeupTypeEnum.Brighten),
+            new Category("eyeball", "美瞳", NveMakeupTypeEnum.Eyeball)
+    };
+
+    private final List<Item> items;
+    private final List<ComposeItem> composeItems;
+    private final List<Category> categories;
+    private final NveMakeupSelectionState selectionState;
+    private final Listener listener;
+    private final int noneIconResource;
+    private final Set<String> availableItems = new HashSet<>();
+    private final LinearLayout panel;
+    private final LinearLayout categoryChips;
+    private final LinearLayout itemChips;
+    private final TextView status;
+    private final Button entryButton;
+    private Category category;
+    private boolean runtimeReady;
+    private NveCompactEffectEntryBar.Panel.ExpansionListener expansionListener;
+
+    NveCompactMakeupPanelView(
+            Context context,
+            List<Item> items,
+            List<ComposeItem> composeItems,
+            NveMakeupSelectionState selectionState,
+            int noneIconResource,
+            Listener listener) {
+        super(context);
+        this.items = new ArrayList<>(items);
+        this.composeItems = new ArrayList<>(composeItems);
+        this.selectionState = selectionState;
+        this.noneIconResource = noneIconResource;
+        this.listener = listener;
+        categories = buildCategories(this.items, !this.composeItems.isEmpty());
+        if (categories.isEmpty()) {
+            throw new IllegalArgumentException("makeup panel requires at least one requested item");
+        }
+        category = categories.get(0);
+        setClipChildren(false);
+
+        panel = new LinearLayout(context);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(10), dp(6), dp(10), dp(8));
+        panel.setBackground(rounded(COLOR_PANEL, 20, 1, COLOR_OUTLINE));
+        panel.setElevation(dp(10));
+        panel.setClickable(true);
+        panel.setVisibility(GONE);
+        setOnClickListener(view -> collapse());
+        setClickable(false);
+
+        entryButton = compactButton("美妆");
+        entryButton.setContentDescription("nve-makeup-entry");
+        entryButton.setTextSize(12);
+        entryButton.setElevation(dp(8));
+        entryButton.setOnClickListener(view ->
+                setPanelExpanded(panel.getVisibility() != VISIBLE));
+        LayoutParams entryParams = new LayoutParams(
+                dp(68), dp(36), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        entryParams.bottomMargin = dp(8);
+        addView(entryButton, entryParams);
+
+        itemChips = new LinearLayout(context);
+        itemChips.setOrientation(LinearLayout.HORIZONTAL);
+        itemChips.setGravity(Gravity.CENTER_VERTICAL);
+        HorizontalScrollView itemScroll = horizontalScroll(itemChips);
+        panel.addView(itemScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(68)));
+
+        categoryChips = new LinearLayout(context);
+        categoryChips.setOrientation(LinearLayout.HORIZONTAL);
+        categoryChips.setGravity(Gravity.CENTER_VERTICAL);
+        HorizontalScrollView categoryScroll = horizontalScroll(categoryChips);
+        panel.addView(categoryScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
+
+        status = new TextView(context);
+        status.setTextColor(COLOR_TEXT_SECONDARY);
+        status.setTextSize(11);
+        status.setGravity(Gravity.CENTER_VERTICAL);
+        status.setSingleLine(true);
+        status.setVisibility(GONE);
+        panel.addView(status, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(24)));
+
+        LayoutParams panelParams = new LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM);
+        panelParams.leftMargin = dp(10);
+        panelParams.rightMargin = dp(10);
+        addView(panel, panelParams);
+
+        rebuildCategories();
+        rebuildItems();
+        updateEntryStyle(false);
+    }
+
+    void setRuntimeState(
+            boolean ready,
+            String reason,
+            Set<String> availableItemIds) {
+        runtimeReady = ready;
+        availableItems.clear();
+        if (availableItemIds != null) {
+            availableItems.addAll(availableItemIds);
+        }
+        status.setVisibility(ready ? GONE : VISIBLE);
+        status.setText(reason == null ? "美妆尚未就绪" : reason);
+        status.setContentDescription(status.getText());
+        rebuildItems();
+    }
+
+    NveMakeupSelectionState.Snapshot saveSelectionState() {
+        return selectionState.snapshot();
+    }
+
+    void restoreSelectionState(NveMakeupSelectionState.Snapshot snapshot) {
+        selectionState.restore(snapshot);
+        rebuildCategories();
+        rebuildItems();
+    }
+
+    @Override
+    public View detachEntryButton() {
+        removeView(entryButton);
+        entryButton.setTranslationX(0f);
+        return entryButton;
+    }
+
+    @Override
+    public void setEntryVisible(boolean visible) {
+        entryButton.setVisibility(visible ? VISIBLE : GONE);
+    }
+
+    @Override
+    public void setExpansionListener(
+            NveCompactEffectEntryBar.Panel.ExpansionListener listener) {
+        expansionListener = listener;
+    }
+
+    @Override
+    public void collapse() {
+        if (panel.getVisibility() == VISIBLE) {
+            setPanelExpanded(false);
+        }
+    }
+
+    private List<Category> buildCategories(List<Item> source, boolean includeCompose) {
+        List<Category> result = new ArrayList<>();
+        if (includeCompose) {
+            result.add(new Category("compose", "妆容", null));
+        }
+        for (Category candidate : ALL_SINGLE_CATEGORIES) {
+            for (Item item : source) {
+                if (item.type() == candidate.type) {
+                    result.add(candidate);
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    private void rebuildCategories() {
+        categoryChips.removeAllViews();
+        for (Category item : categories) {
+            Button chip = compactButton(item.label);
+            chip.setTextSize(12);
+            chip.setContentDescription("nve-makeup-tab-" + item.id);
+            chip.setSelected(item == category);
+            applySelectionStyle(chip, item == category);
+            chip.setOnClickListener(view -> {
+                category = item;
+                rebuildCategories();
+                rebuildItems();
+            });
+            categoryChips.addView(chip, chipParams());
+        }
+    }
+
+    private void rebuildItems() {
+        itemChips.removeAllViews();
+        MakeupItemView none =
+                new MakeupItemView(getContext(), "无", noneIconResource);
+        none.setContentDescription("nve-makeup-none-" + category.id);
+        boolean noneSelected = category.type == null
+                ? !selectionState.isComposeSelected()
+                : !selectionState.hasCategorySelection(category.type);
+        none.setEnabled(runtimeReady);
+        none.setAlpha(runtimeReady ? 1f : 0.45f);
+        none.setSelectionStyle(noneSelected);
+        none.setOnClickListener(view -> clearCurrentCategory());
+        itemChips.addView(none, makeupItemParams());
+
+        if (category.type == null) {
+            addComposeItems();
+            return;
+        }
+
+        String selected = selectionState.selectedSingleId(category.type);
+        for (Item item : items) {
+            if (item.type() != category.type) {
+                continue;
+            }
+            MakeupItemView chip =
+                    new MakeupItemView(getContext(), item.label(), item.cover());
+            chip.setContentDescription("nve-makeup-item-" + item.id());
+            boolean available = runtimeReady && availableItems.contains(item.id());
+            chip.setEnabled(available);
+            chip.setAlpha(available ? 1f : 0.45f);
+            boolean isSelected = item.id().equals(selected);
+            chip.setSelectionStyle(isSelected);
+            chip.setOnClickListener(view -> {
+                String current = selectionState.selectedSingleId(item.type());
+                String next = item.id().equals(current) ? null : item.id();
+                if (next == null) {
+                    selectionState.clearSingle(item.type());
+                } else {
+                    selectionState.selectSingle(item.type(), next);
+                }
+                listener.onSingleSelected(item.type(), next);
+                rebuildItems();
+            });
+            itemChips.addView(chip, makeupItemParams());
+        }
+    }
+
+    private void addComposeItems() {
+        for (ComposeItem item : composeItems) {
+            MakeupItemView compose =
+                    new MakeupItemView(getContext(), item.label(), item.cover());
+            compose.setContentDescription("nve-makeup-item-" + item.id());
+            boolean available = runtimeReady && availableItems.contains(item.id());
+            compose.setEnabled(available);
+            compose.setAlpha(available ? 1f : 0.45f);
+            boolean selected = item.id().equals(selectionState.selectedComposeId());
+            compose.setSelectionStyle(selected);
+            compose.setOnClickListener(view -> {
+                String selectedId = selectionState.selectedComposeId();
+                if (item.id().equals(selectedId)) {
+                    selectionState.clearCompose();
+                    listener.onComposeSelected(null);
+                } else {
+                    selectionState.selectCompose(item.id(), item.componentTypes());
+                    listener.onComposeSelected(item.id());
+                }
+                rebuildItems();
+            });
+            itemChips.addView(compose, makeupItemParams());
+        }
+    }
+
+    private void clearCurrentCategory() {
+        if (category.type == null) {
+            selectionState.clearCompose();
+            listener.onComposeSelected(null);
+        } else {
+            selectionState.clearSingle(category.type);
+            listener.onSingleSelected(category.type, null);
+        }
+        rebuildItems();
+    }
+
+    private void setPanelExpanded(boolean expanded) {
+        panel.setVisibility(expanded ? VISIBLE : GONE);
+        setClickable(expanded);
+        setEntryVisible(!expanded);
+        entryButton.setSelected(expanded);
+        updateEntryStyle(expanded);
+        if (expansionListener != null) {
+            expansionListener.onExpansionChanged(expanded);
+        }
+    }
+
+    private void updateEntryStyle(boolean selected) {
+        entryButton.setTextColor(COLOR_TEXT_PRIMARY);
+        entryButton.setBackground(rounded(
+                selected ? COLOR_ACCENT : COLOR_SURFACE,
+                18,
+                selected ? 0 : 1,
+                COLOR_OUTLINE));
+    }
+
+    private void applySelectionStyle(Button button, boolean selected) {
+        button.setTextColor(selected ? COLOR_TEXT_PRIMARY : COLOR_TEXT_SECONDARY);
+        button.setBackground(rounded(
+                selected ? COLOR_ACCENT : COLOR_SURFACE,
+                14,
+                selected ? 0 : 1,
+                selected ? COLOR_ACCENT : COLOR_OUTLINE));
+    }
+
+    private HorizontalScrollView horizontalScroll(LinearLayout content) {
+        HorizontalScrollView scroll = new HorizontalScrollView(getContext());
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setFillViewport(false);
+        scroll.setClipToPadding(false);
+        scroll.setPadding(dp(2), 0, dp(2), 0);
+        scroll.addView(content, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        return scroll;
+    }
+
+    private LinearLayout.LayoutParams chipParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
+        params.rightMargin = dp(7);
+        return params;
+    }
+
+    private LinearLayout.LayoutParams makeupItemParams() {
+        LinearLayout.LayoutParams params =
+                new LinearLayout.LayoutParams(dp(60), dp(68));
+        params.rightMargin = dp(6);
+        return params;
+    }
+
+    private Button compactButton(String text) {
+        Button button = new Button(getContext());
+        button.setText(text);
+        button.setTextColor(COLOR_TEXT_PRIMARY);
+        button.setAllCaps(false);
+        button.setGravity(Gravity.CENTER);
+        button.setStateListAnimator(null);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setPadding(dp(10), 0, dp(10), 0);
+        button.setBackground(rounded(COLOR_SURFACE, 14, 1, COLOR_OUTLINE));
+        return button;
+    }
+
+    private GradientDrawable rounded(
+            int color, int radiusDp, int strokeWidthDp, int strokeColor) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radiusDp));
+        if (strokeWidthDp > 0) {
+            drawable.setStroke(dp(strokeWidthDp), strokeColor);
+        }
+        return drawable;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    /**
+     * Cover bitmaps must be decoded by the host resource worker before binding this view.
+     * The panel never performs file or network I/O while rebuilding categories.
+     */
+    private final class MakeupItemView extends LinearLayout {
+        private final FrameLayout preview;
+        private final ImageView image;
+        private final TextView label;
+        private final boolean tintImage;
+
+        MakeupItemView(Context context, String title, Bitmap cover) {
+            this(context, title, cover, 0);
+        }
+
+        MakeupItemView(Context context, String title, int iconResource) {
+            this(context, title, null, iconResource);
+        }
+
+        private MakeupItemView(
+                Context context,
+                String title,
+                Bitmap cover,
+                int iconResource) {
+            super(context);
+            setOrientation(VERTICAL);
+            setGravity(Gravity.CENTER);
+            setPadding(dp(4), 0, dp(4), 0);
+            setClickable(true);
+            setFocusable(true);
+
+            preview = new FrameLayout(context);
+            preview.setBackground(rounded(COLOR_SURFACE, 10, 1, COLOR_OUTLINE));
+
+            tintImage = iconResource != 0;
+            image = new ImageView(context);
+            image.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            image.setBackground(rounded(COLOR_SURFACE, 8, 0, COLOR_OUTLINE));
+            image.setClipToOutline(true);
+            if (cover != null) {
+                image.setImageBitmap(cover);
+                image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            } else if (iconResource != 0) {
+                image.setImageResource(iconResource);
+                image.setScaleType(ImageView.ScaleType.CENTER);
+                image.setPadding(dp(10), dp(10), dp(10), dp(10));
+            } else {
+                TextView fallback = new TextView(context);
+                fallback.setText(title.substring(0, 1));
+                fallback.setTextColor(COLOR_TEXT_SECONDARY);
+                fallback.setTextSize(16);
+                fallback.setGravity(Gravity.CENTER);
+                preview.addView(
+                        fallback,
+                        new FrameLayout.LayoutParams(
+                                dp(44), dp(44), Gravity.CENTER));
+            }
+            if (cover != null || iconResource != 0) {
+                preview.addView(
+                        image,
+                        new FrameLayout.LayoutParams(
+                                dp(44), dp(44), Gravity.CENTER));
+            }
+            addView(preview, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+            label = new TextView(context);
+            label.setText(title);
+            label.setTextColor(COLOR_TEXT_SECONDARY);
+            label.setTextSize(10);
+            label.setGravity(Gravity.CENTER);
+            label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.END);
+            addView(
+                    label,
+                    new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, dp(16)));
+        }
+
+        void setSelectionStyle(boolean selected) {
+            setSelected(selected);
+            label.setTextColor(
+                    selected ? COLOR_TEXT_PRIMARY : COLOR_TEXT_SECONDARY);
+            preview.setBackground(rounded(
+                    COLOR_SURFACE,
+                    10,
+                    selected ? 2 : 1,
+                    selected ? COLOR_ACCENT : COLOR_OUTLINE));
+            if (tintImage) {
+                image.setImageTintList(ColorStateList.valueOf(
+                        selected ? COLOR_TEXT_PRIMARY : COLOR_TEXT_SECONDARY));
+            }
+        }
+    }
+
+    private static final class Category {
+        final String id;
+        final String label;
+        final NveMakeupTypeEnum type;
+
+        Category(String id, String label, NveMakeupTypeEnum type) {
+            this.id = id;
+            this.label = label;
+            this.type = type;
+        }
+    }
+}

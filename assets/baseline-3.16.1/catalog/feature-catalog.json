@@ -1,0 +1,666 @@
+{
+	"schema_version": 12,
+	"skill_version": "1.0.0",
+	"sdk_version": "3.16.1",
+	"aar_sha256": "11e1bee1d462c17159ab0239d3ca6513f20da52893f553cf0f56d9cdb7bb5eff",
+	"runtime_contract": {
+		"initialize_thread": "android-main-thread-after-gl-ready",
+		"asset_prepare_thread": "resource-worker",
+		"asset_install_thread": "android-main-thread",
+		"render_thread": "current-gl-context",
+		"surface_texture_callback_thread": "dedicated-handler-thread-not-ui-main",
+		"preview_render_clock": "camera-frame-only",
+		"slider_update_policy": "coalesce-latest-value-no-request-render",
+		"teardown_order": [
+			"stop-frame-source",
+			"drain-or-drop-pending-frame",
+			"release-host-gl-resources",
+			"effect-kit-clean-up"
+		],
+		"restore_order": [
+			"neutral-beauty-anchor",
+			"shape",
+			"micro-shape",
+			"makeup",
+			"filter",
+			"face-prop",
+			"custom-effect"
+		],
+		"beauty_controller_restore_sequence": [
+			"register-beauty",
+			"enable-beauty",
+			"register-shape",
+			"enable-shape",
+			"register-micro-shape",
+			"enable-micro-shape",
+			"reapply-desired-state"
+		]
+	},
+	"model_contract": {
+		"initialization_order": [
+			"FACE",
+			"FACE_COMMON",
+			"ADVANCED_BEAUTY",
+			"FAKE_FACE",
+			"EYEBALL",
+			"SEGMENTATION",
+			"AVATAR"
+		],
+		"baseline_files": {
+			"FACE": "facemodel/ms/ms_face240_v4.0.3.next.model",
+			"FACE_COMMON": "facemodel/common/facecommon_v1.0.1.dat",
+			"ADVANCED_BEAUTY": "facemodel/common/advancedbeauty_v1.0.1.dat",
+			"FAKE_FACE": "facemodel/common/fakeface.dat",
+			"EYEBALL": "facemodel/common/ms_eyecontour_v2.0.0.next.model",
+			"SEGMENTATION": "facemodel/common/ms_humansegment_medium_v2.0.0.next.model",
+			"AVATAR": "facemodel/common/ms_avatar_v2.0.0.next.model"
+		}
+	},
+	"asset_contract": {
+		"identity": "explicit-feature-to-authorized-path-mapping",
+		"baseline_filename_role": "registered-baseline-reference-only",
+		"custom_or_updated_assets_allowed": true,
+		"required_checks": [
+			"feature-id",
+			"authorized-path",
+			"package-type",
+			"asset-license-when-required",
+			"install-or-upgrade-result",
+			"usable-package-id",
+			"runtime-effect"
+		]
+	},
+	"render_profiles": {
+		"camera2-oes-nv21": {
+			"preferred_preview_size": [1280, 720],
+			"preferred_preview_fps": 30,
+			"texture_size_space": "display-oriented",
+			"buffer_size_space": "camera-plane",
+			"texture_orientation": "sensor-orientation",
+			"buffer_rotation": "display-orientation",
+			"effect_frame_requirement": "paired-oes-and-nv21",
+			"detection_frame_consumption": "bounded-reuse-within-100ms-and-reference-counted-release",
+			"missing_pair_behavior": "draw-current-raw-oes-never-hold-stale-display",
+			"nv21_conversion": "direct-image-to-reusable-buffer-latest-only",
+			"output_size_source": "nve-output-texture",
+			"output_observation": "one-time-log-per-texture-type-with-width-height",
+			"display_contract": "raw-oes-and-effect-output-share-direction-mirror-crop-viewport",
+			"materialized_templates": [
+				"NveCameraOrientation",
+				"NveCamera2PreviewConfig",
+				"NveNv21Converter",
+				"NveCamera2FramePairer",
+				"NveCamera2RenderInputFactory",
+				"NveCamera2TexturePresenter"
+			]
+		}
+	},
+	"beauty": {
+		"skin_selector_update_policy": "only-when-algorithm-changes",
+		"skin": [
+			{
+				"id": "buffing-skin",
+				"type": "BuffingSkin",
+				"setter": "setBlurIntensity",
+				"min": 0,
+				"max": 1
+			},
+			{
+				"id": "advanced-buffing-1",
+				"type": "AdvancedBuffingSkin1",
+				"setter": "setBlurIntensity",
+				"min": 0,
+				"max": 1
+			},
+			{
+				"id": "advanced-buffing-2",
+				"type": "AdvancedBuffingSkin2",
+				"setter": "setBlurIntensity",
+				"min": 0,
+				"max": 1
+			},
+			{
+				"id": "advanced-buffing-3",
+				"type": "AdvancedBuffingSkin3",
+				"setter": "setBlurIntensity",
+				"min": 0,
+				"max": 1
+			},
+			{
+				"id": "advanced-buffing-4",
+				"type": "AdvancedBuffingSkin4",
+				"setter": "setBlurIntensity",
+				"min": 0,
+				"max": 1,
+				"availability": "high-cpu-only"
+			},
+			{
+				"id": "whitening-a",
+				"type": "WhiteningA",
+				"setter": "setWhiteningIntensity",
+				"min": 0,
+				"max": 1
+			},
+			{
+				"id": "whitening-b",
+				"type": "WhiteningB",
+				"setter": "setWhiteningIntensity",
+				"min": 0,
+				"max": 1
+			},
+			{ "id": "matte", "setter": "setMatteIntensity", "min": 0, "max": 1 },
+			{ "id": "matte-fill-radius", "setter": "setMatteFillRadius", "min": 0, "max": 1 },
+			{ "id": "reddening", "setter": "setReddeningIntensity", "min": 0, "max": 1 },
+			{ "id": "definition", "setter": "setDefinitionIntensity", "min": 0, "max": 1 },
+			{ "id": "sharpness", "setter": "setSharpnessIntensity", "min": 0, "max": 10 }
+		],
+		"shape": [
+			{
+				"id": "face-width",
+				"enum": "FACE_WIDTH",
+				"min": -1,
+				"max": 1,
+				"asset": "96550C89-A5B8-42F0-9865-E07263D0B20C.3.facemesh"
+			},
+			{
+				"id": "face-length",
+				"enum": "FACE_LENGTH",
+				"min": -1,
+				"max": 1,
+				"asset": "B85D1520-C60F-4B24-A7B7-6FEB0E737F15.3.facemesh"
+			},
+			{
+				"id": "face-size",
+				"enum": "FACE_SIZE",
+				"min": -1,
+				"max": 1,
+				"asset": "63BD3F32-D01B-4755-92D5-0DE361E4045A.3.facemesh"
+			},
+			{
+				"id": "forehead",
+				"enum": "FORE_HEAD",
+				"min": -1,
+				"max": 1,
+				"asset": "A351D77A-740D-4A39-B0EA-393643159D99.4.facemesh"
+			},
+			{
+				"id": "chin",
+				"enum": "CHIN",
+				"min": -1,
+				"max": 1,
+				"asset": "FF2D36C5-6C91-4750-9648-BD119967FE66.3.facemesh"
+			},
+			{
+				"id": "eye-size",
+				"enum": "EYE_SIZE",
+				"min": -1,
+				"max": 1,
+				"asset": "71C4CF51-09D7-4CB0-9C24-5DE9375220AE.3.facemesh"
+			},
+			{
+				"id": "eye-angle",
+				"enum": "EYE_ANGLE",
+				"min": -1,
+				"max": 1,
+				"asset": "B0B7A240-48B9-4983-B2C8-690FFA7211EB.2.facemesh"
+			},
+			{
+				"id": "nose-width",
+				"enum": "NOSE_WIDTH",
+				"min": -1,
+				"max": 1,
+				"asset": "8D676A5F-73BD-472B-9312-B6E1EF313A4C.3.facemesh"
+			},
+			{
+				"id": "nose-length",
+				"enum": "NOSE_LENGTH",
+				"min": -1,
+				"max": 1,
+				"asset": "3632E2FF-8760-4D90-A2B6-FFF09C117F5D.3.facemesh"
+			},
+			{
+				"id": "mouth-size",
+				"enum": "MOUTH_SIZE",
+				"min": -1,
+				"max": 1,
+				"asset": "A80CC861-A773-4B8F-9CFA-EE63DB23EEC2.3.facemesh"
+			},
+			{
+				"id": "mouth-corner",
+				"enum": "MOUTH_CORNER",
+				"min": -1,
+				"max": 1,
+				"asset": "CD69D158-9023-4042-AEAD-F8E9602FADE9.3.facemesh"
+			}
+		],
+		"micro_shape": [
+			{
+				"id": "head-size",
+				"enum": "HEAD_SIZE",
+				"min": -1,
+				"max": 1,
+				"asset": "316E3641-98BA-4E07-958E-9ED7D7F75E97.1.warp"
+			},
+			{
+				"id": "cheekbone-width",
+				"enum": "CHEEKBONE_WIDTH",
+				"min": -1,
+				"max": 1,
+				"asset": "C1C83B8B-8086-49AC-8462-209E429C9B7A.3.facemesh"
+			},
+			{
+				"id": "jaw-width",
+				"enum": "JAW_WIDTH",
+				"min": -1,
+				"max": 1,
+				"asset": "E903C455-8E23-4539-9195-816009AFE06A.3.facemesh"
+			},
+			{
+				"id": "temple-width",
+				"enum": "TEMPLE_WIDTH",
+				"min": -1,
+				"max": 1,
+				"asset": "E4790833-BB9D-4EFC-86DF-D943BDC48FA4.3.facemesh"
+			},
+			{
+				"id": "nasolabial-folds",
+				"enum": "NASOLABIAL_FOLDS",
+				"min": 0,
+				"max": 1,
+				"built_in": true
+			},
+			{ "id": "dark-circles", "enum": "DARK_CIRCLES", "min": 0, "max": 1, "built_in": true },
+			{ "id": "brighten-eyes", "enum": "BRIGHTEN_EYES", "min": 0, "max": 1, "built_in": true },
+			{ "id": "whiten-teeth", "enum": "WHITEN_TEETH", "min": 0, "max": 1, "built_in": true },
+			{
+				"id": "eye-angle",
+				"enum": "EYE_ANGLE_DEGREE",
+				"min": -1,
+				"max": 1,
+				"asset": "54B2B9B4-5A7A-484C-B602-39A4730115A0.4.facemesh"
+			},
+			{
+				"id": "eye-distance",
+				"enum": "EYE_DISTANCE",
+				"min": -1,
+				"max": 1,
+				"asset": "80329F14-8BDB-48D1-B30B-89A33438C481.4.facemesh"
+			},
+			{
+				"id": "eye-height",
+				"enum": "EYE_HEIGHT",
+				"min": -1,
+				"max": 1,
+				"asset": "46B1D78F-DF5D-455A-9F97-C01B6405718F.4.facemesh"
+			},
+			{
+				"id": "eye-width",
+				"enum": "EYE_WIDTH",
+				"min": -1,
+				"max": 1,
+				"asset": "0605A846-200E-443F-B2FF-FE8339C9E571.facemesh"
+			},
+			{
+				"id": "eye-arc",
+				"enum": "EYE_ARC",
+				"min": -1,
+				"max": 1,
+				"asset": "BF71EA3E-E39E-4EFD-A30E-161C3D9E454D.4.facemesh"
+			},
+			{
+				"id": "eye-y-offset",
+				"enum": "EYE_Y_OFFSET",
+				"min": -1,
+				"max": 1,
+				"asset": "57C0BDDF-E08B-48F0-95FF-7F5171A9E6DF.4.facemesh"
+			},
+			{
+				"id": "philtrum",
+				"enum": "PHILTRUM",
+				"min": -1,
+				"max": 1,
+				"asset": "37552044-E743-4A60-AC6E-7AADBA1E5B3B.3.facemesh"
+			},
+			{
+				"id": "nose-bridge-width",
+				"enum": "NOSE_BRIDGE_WIDTH",
+				"min": -1,
+				"max": 1,
+				"asset": "23A40970-CE6F-4684-AF57-F78A0CBB53D1.3.facemesh"
+			},
+			{
+				"id": "nose-head",
+				"enum": "NOSE_HEAD",
+				"min": -1,
+				"max": 1,
+				"asset": "44E11F37-A4E5-44B5-8915-CA42B84F9F09.2.facemesh"
+			},
+			{
+				"id": "eyebrow-thickness",
+				"enum": "EYEBROW_THICKNESS",
+				"min": -1,
+				"max": 1,
+				"asset": "C2045DCA-D8C5-4C50-B942-69F749E32E93.2.facemesh"
+			},
+			{
+				"id": "eyebrow-angle",
+				"enum": "EYEBROW_ANGLE",
+				"min": -1,
+				"max": 1,
+				"asset": "CC86C182-62D7-4F1D-AE9D-F5E4E99977A5.2.facemesh"
+			},
+			{
+				"id": "eyebrow-y-offset",
+				"enum": "EYEBROW_Y_OFFSET",
+				"min": -1,
+				"max": 1,
+				"asset": "90C09073-225B-461D-8645-73CE7825BB33.2.facemesh"
+			},
+			{
+				"id": "eyebrow-x-offset",
+				"enum": "EYEBROW_X_OFFSET",
+				"min": -1,
+				"max": 1,
+				"asset": "F77B5F0E-AF43-45DB-96BB-62419B9CECA8.2.facemesh"
+			}
+		]
+	},
+	"makeup": {
+		"single": [
+			{ "id": "lip", "enum": "Lip" },
+			{ "id": "eyebrow", "enum": "Eyebrow" },
+			{ "id": "eyeshadow", "enum": "Eyeshadow" },
+			{ "id": "eyelash", "enum": "Eyelash" },
+			{ "id": "eyeliner", "enum": "Eyeliner" },
+			{ "id": "blusher", "enum": "Blusher" },
+			{ "id": "shadow", "enum": "Shadow" },
+			{ "id": "brighten", "enum": "Brighten" },
+			{ "id": "eyeball", "enum": "Eyeball", "conditional_models": ["EYEBALL"] }
+		],
+		"compose_component_types": ["makeup", "beauty", "shape", "microShape", "filter"],
+		"package_types": [".makeup", ".facemesh", ".warp", ".videofx"],
+		"selection_state_template": "NveMakeupSelectionState",
+		"asset_repository_template": "NveMakeupAssetRepository",
+		"resource_loader_template": "NveMakeupResourceLoader",
+		"template_runtime_dependencies": [
+			{
+				"template": "features/NveMakeupResourceLoader.java.template",
+				"coordinate": "com.google.code.gson:gson:2.8.2",
+				"required_class": "com.google.gson.Gson",
+				"reason": "NveEffectKit ParseJsonFile delegates compose metadata parsing to Gson"
+			}
+		],
+		"regression_test_templates": [
+			"NveMakeupSelectionStateTest",
+			"NveMakeupAssetRepositoryTest"
+		],
+		"compose_items": "multiple-real-assets",
+		"resource_publish_policy": "latest-generation-all-dependencies-atomic"
+	},
+	"filter": {
+		"selection": "single",
+		"range": [0, 1],
+		"none_semantics": "remove-current-filter"
+	},
+	"face_prop": {
+		"selection": "single",
+		"none_semantics": "clear-id-disable-controller-clear-desired-state",
+		"required_models": ["FACE"],
+		"conditional_models": ["FAKE_FACE", "EYEBALL", "SEGMENTATION", "AVATAR"]
+	},
+	"feature_contract": {
+		"aliases": {
+			"beauty": "beauty-suite",
+			"beauty-full": "beauty-suite",
+			"full-beauty": "beauty-suite",
+			"美颜": "beauty-suite",
+			"完整美颜": "beauty-suite",
+			"美肤": "beauty-skin",
+			"美型": "beauty-shape",
+			"微整形": "beauty-micro-shape",
+		"beauty-basic": "beauty-skin",
+		"beauty-skin-full": "beauty-skin",
+		"beauty-shape-full": "beauty-shape",
+		"beauty-micro-shape-full": "beauty-micro-shape",
+		"shape": "beauty-shape",
+			"shape-face": "beauty-shape",
+			"micro-shape": "beauty-micro-shape",
+			"makeup": "makeup-suite",
+			"makeup-full": "makeup-suite",
+			"full-makeup": "makeup-suite",
+			"美妆": "makeup-suite",
+			"完整美妆": "makeup-suite",
+		"单妆": "makeup-single",
+		"makeup-single-full": "makeup-single",
+			"妆容": "makeup-compose",
+			"filter": "filter-packaged",
+			"filters": "filter-packaged",
+			"滤镜": "filter-packaged",
+			"filter-full": "filter-packaged",
+			"full-filter": "filter-packaged",
+			"完整滤镜": "filter-packaged",
+			"prop": "face-prop",
+			"props": "face-prop",
+			"face-props": "face-prop",
+			"道具": "face-prop",
+			"人脸道具": "face-prop",
+			"贴纸": "face-prop",
+			"custom-effects": "custom-effect",
+			"自定义特效": "custom-effect",
+			"background-segmentation": "custom-effect-background-segmentation",
+			"背景分割": "custom-effect-background-segmentation",
+			"人像分割": "custom-effect-background-segmentation"
+		},
+		"capabilities": {
+			"beauty-suite": {
+				"reference": "references/beauty.md",
+				"bundle": ["beauty-skin", "beauty-shape", "beauty-micro-shape"],
+				"ui_module": "beauty"
+			},
+			"beauty-skin": {
+				"reference": "references/beauty.md",
+				"controller": "NveBeauty",
+				"ui_module": "beauty",
+				"models": ["FACE", "FACE_COMMON", "ADVANCED_BEAUTY"],
+				"assets": [],
+				"intensity": true
+			},
+			"beauty-shape": {
+				"reference": "references/beauty.md",
+				"controller": "NveShape",
+				"ui_module": "beauty",
+				"models": ["FACE", "FACE_COMMON"],
+				"assets": [".facemesh", ".warp"],
+				"intensity": true
+			},
+			"beauty-micro-shape": {
+				"reference": "references/beauty.md",
+				"controller": "NveMicroShape",
+				"ui_module": "beauty",
+				"models": ["FACE", "FACE_COMMON"],
+				"assets": [".facemesh", ".warp"],
+				"intensity": true
+			},
+			"makeup-suite": {
+				"reference": "references/makeup.md",
+				"bundle": ["makeup-single", "makeup-compose"],
+				"ui_module": "makeup"
+			},
+			"makeup-single": {
+				"reference": "references/makeup.md",
+				"controller": "NveMakeup",
+				"ui_module": "makeup",
+				"models": ["FACE", "FACE_COMMON", "ADVANCED_BEAUTY"],
+				"assets": [".makeup"],
+				"intensity": false
+			},
+			"makeup-compose": {
+				"reference": "references/makeup.md",
+				"controller": "NveMakeup",
+				"ui_module": "makeup",
+				"models": ["FACE", "FACE_COMMON", "ADVANCED_BEAUTY"],
+				"assets": [".makeup", ".facemesh", ".warp", ".videofx"],
+				"intensity": false
+			},
+			"filter-packaged": {
+				"reference": "references/effects.md",
+				"controller": "NveFilter",
+				"ui_module": "filter",
+				"models": [],
+				"assets": [".videofx"],
+				"asset_mapping_required": true,
+				"asset_mapping_multiple": true,
+				"asset_mapping_model": "packages-display-items",
+				"asset_license_policy": "explicit",
+				"intensity": true
+			},
+			"face-prop": {
+				"reference": "references/effects.md",
+				"controller": "NveFaceProp",
+				"ui_module": "face-prop",
+				"models": ["FACE"],
+				"assets": [".arscene"],
+				"intensity": false
+			},
+			"custom-effect": {
+				"reference": "references/effects.md",
+				"controller": "NvsVideoEffect",
+				"ui_module": "custom-effect",
+				"models": [],
+				"assets": [],
+				"intensity": false
+			},
+			"custom-effect-background-segmentation": {
+				"reference": "references/effects.md",
+				"controller": "NvsVideoEffect",
+				"ui_module": "custom-effect",
+				"models": ["FACE", "SEGMENTATION"],
+				"assets": [],
+				"intensity": false
+			}
+		}
+	},
+	"ui": {
+		"default_profiles": {
+			"beauty": "compact-beauty",
+			"makeup": "compact-makeup",
+			"filter": "compact-filter",
+			"face-prop": "compact-face-prop"
+		},
+		"materialized_templates": {
+			"shared-entry-bar": "NveCompactEffectEntryBar",
+			"compact-beauty": "NveCompactBeautyPanelView",
+			"compact-makeup": "NveCompactMakeupPanelView",
+			"compact-filter": "NveCompactFilterPanelView",
+			"compact-face-prop": "NveCompactFacePropPanelView"
+		},
+		"beauty_tabs": ["skin", "shape", "micro-shape"],
+		"beauty_tab_presentation": "text-with-accent-underline",
+		"beauty_item_presentation": "cover-and-label",
+		"beauty_item_size_dp": [60, 60],
+		"beauty_cover_size_dp": [42, 42],
+		"beauty_bitmap_size_dp": [38, 38],
+		"beauty_item_gap_dp": 4,
+		"face_prop_item_presentation": "cover-and-optional-label",
+		"face_prop_item_size_dp": [60, 68],
+		"face_prop_preview_frame_size_dp": [48, 48],
+		"face_prop_cover_only_size_dp": [44, 44],
+		"face_prop_cover_with_label_size_dp": [44, 44],
+		"face_prop_item_gap_dp": 6,
+		"face_prop_selection": "preview-frame-only-2dp-accent-outline-no-fill",
+		"face_prop_none_presentation": "filter-style-icon-card-with-conditional-label",
+		"face_prop_none_label_policy": "show-only-when-any-item-has-visible-label",
+		"face_prop_hidden_label_layout": "gone-and-preview-vertically-centered",
+		"face_prop_none_icon_size_dp": [24, 24],
+		"beauty_cover_decode_owner": "resource-worker",
+		"beauty_cover_key_format": "<category>:<item-id>",
+		"beauty_cover_host_binding": "setCovers-required-after-resource-publish",
+		"beauty_cover_missing_behavior": "first-label-character-placeholder",
+		"beauty_adjustment_row_order": [
+			"value",
+			"slider",
+			"reset",
+			"master-control"
+		],
+		"beauty_reset_owner": "coordinator-reset-all",
+		"beauty_reset_size_dp": [48, 30],
+		"beauty_reset_master_gap_dp": 8,
+		"beauty_master_presentation": "label-and-switch",
+		"beauty_master_label": "开启",
+		"beauty_master_label_switch_gap_dp": 4,
+		"beauty_panel_content_rows_dp": [40, 60, 40],
+		"makeup_tabs": [
+			"compose",
+			"lip",
+			"eyebrow",
+			"eyeshadow",
+			"eyelash",
+			"eyeliner",
+			"blusher",
+			"shadow",
+			"brighten",
+			"eyeball"
+		],
+		"entry_label_behavior": "stable-module-label-selected-state-only",
+		"makeup_row_order": ["effect-items", "primary-categories", "status"],
+		"makeup_item_presentation": "cover-and-label",
+		"makeup_item_size_dp": [60, 68],
+		"makeup_cover_size_dp": [44, 44],
+		"makeup_cover_decode_owner": "resource-worker",
+		"makeup_none_presentation": "filter-style-icon-card",
+		"filter_row_order": ["effect-items", "value-slider-reset", "status"],
+		"filter_item_presentation": "cover-frame-with-external-label",
+		"filter_item_size_dp": [60, 68],
+		"filter_preview_frame_size_dp": [48, 48],
+		"filter_bitmap_size_dp": [44, 44],
+		"filter_item_gap_dp": 6,
+		"filter_label_height_dp": 16,
+		"filter_label_text_sp": 10,
+		"filter_label_top_margin_dp": 1,
+		"filter_selection_presentation": "preview-frame-2dp-accent-stroke",
+		"filter_none_presentation": "icon-in-preview-frame-with-external-label",
+		"filter_cover_decode_owner": "resource-worker",
+		"filter_cover_missing_behavior": "neutral-preview-with-label",
+		"filter_intensity_range": [0.0, 1.0],
+		"filter_default_intensity": 0.5,
+		"filter_value_size_dp": [58, 36],
+		"filter_reset_size_dp": [48, 30],
+		"filter_reset_presentation": "flat-translucent-no-stroke-no-elevation",
+		"ui_profiles_repeatable": true,
+		"module_entries": ["beauty", "makeup", "filter", "face-prop"],
+		"entry_bar_layout": "match-parent-width-equal-weight-slots",
+		"entry_bar_background_argb": "E61B1B24",
+		"entry_bar_corner_radius_dp": 24,
+		"entry_bar_outline_dp": 1,
+		"entry_bar_padding_dp": [8, 6, 8, 6],
+		"entry_bar_outer_margin_dp": [8, 8, 8],
+		"entry_bar_bottom_inset_policy": "host-window-inset-plus-8dp",
+		"entry_slot_height_dp": 36,
+		"entry_panel_visibility": "mutually-exclusive",
+		"panel_collapse_gesture": "outside-blank-area-only",
+		"panel_internal_touch_behavior": "consume-without-collapse",
+		"panel_bottom_margin_dp": 0,
+		"panel_host_layout": "match-parent-transparent-overlay",
+		"panel_expansion_policy": "single-expanded-panel",
+		"common_actions": ["select", "enable", "reset", "remove", "failure-state"],
+		"design_tokens": {
+			"panel_argb": "F21B1B24",
+			"surface_argb": "FF2A2A36",
+			"accent_argb": "FFFF6F9F",
+			"outline_argb": "3DFFFFFF",
+			"panel_target_height_dp": 152,
+			"entry_size_dp": [64, 32],
+			"control_height_dp": 36,
+			"control_gap_dp": [6, 7],
+			"value_width_dp": 58,
+			"value_format": "%.2f"
+		},
+		"selection_semantics": "ui-only-never-reapply-current-effect-value",
+		"effect_write_owners": [
+			"slider-user-change",
+			"explicit-reset",
+			"lifecycle-restore",
+			"master-enable-transition"
+		]
+	}
+}

@@ -1,0 +1,60 @@
+package __TARGET_PACKAGE__;
+
+import com.meishe.nveffectkit.NveEffectKit;
+import com.meishe.nveffectkit.prop.NveFaceProp;
+
+/** Complete face-prop enable/disable state; call only through the serial control thread. */
+final class NveFacePropCoordinator {
+    interface Backend {
+        void apply(String installedPackageId, boolean enabled);
+    }
+
+    private final Backend backend;
+    private String desiredPackageId;
+
+    NveFacePropCoordinator(NveEffectKit effectKit) {
+        NveFaceProp faceProp = new NveFaceProp();
+        this.backend = (installedPackageId, enabled) -> {
+            if (enabled) {
+                faceProp.setPropId(installedPackageId);
+                faceProp.setEnable(true);
+            } else {
+                faceProp.setPropId("");
+                faceProp.setEnable(false);
+            }
+            effectKit.setFaceProp(faceProp);
+        };
+    }
+
+    NveFacePropCoordinator(Backend backend) {
+        this.backend = backend;
+    }
+
+    void select(String installedPackageId) {
+        if (installedPackageId == null || installedPackageId.isEmpty()) {
+            clear();
+            return;
+        }
+        desiredPackageId = installedPackageId;
+        applyDesiredState();
+    }
+
+    void clear() {
+        desiredPackageId = null;
+        applyDesiredState();
+    }
+
+    /** EffectKit cleanUp invalidates registration; reapply the complete desired state. */
+    void restoreAfterInitialize() {
+        applyDesiredState();
+    }
+
+    private void applyDesiredState() {
+        boolean enabled = desiredPackageId != null;
+        backend.apply(enabled ? desiredPackageId : "", enabled);
+    }
+
+    String desiredPackageId() {
+        return desiredPackageId;
+    }
+}

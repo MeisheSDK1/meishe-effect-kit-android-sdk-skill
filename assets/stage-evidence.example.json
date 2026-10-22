@@ -1,0 +1,51 @@
+{
+  "stages": {
+    "raw-preview": {
+      "observed": false,
+      "frames_present": false,
+      "non_black": false,
+      "viewport_correct": false,
+      "direction_correct": false,
+      "aspect_ratio_correct": false,
+      "front_mirror_correct": false,
+      "back_direction_correct": false
+    },
+    "no-effect": {
+      "observed": false,
+      "non_black": false,
+      "raw_fallback": false,
+      "output_texture_type_recorded": false,
+      "output_dimensions_recorded": false,
+      "gl_state_restored": false,
+      "same_geometry_as_raw": false,
+      "same_direction_as_raw": false,
+      "same_mirror_as_raw": false,
+      "no_flash": false,
+      "no_raw_effect_alternation": false,
+      "oes_and_2d_paths_verified": false
+    },
+    "single-effect": {
+      "observed": false,
+      "visible_change": false,
+      "disable_restores_raw": false,
+      "failure_fallback": false,
+      "no_geometry_jump_on_enable": false,
+      "no_flash_on_enable": false
+    },
+    "scope": {
+      "feature_checks": {}
+    },
+    "restore": {
+      "background_foreground": false,
+      "page_reentry": false,
+      "gl_context_recreated": false,
+      "controllers_reregistered": false,
+      "state_restored": false,
+      "frames_after_restore": false,
+      "no_ar_scene_null": false,
+      "no_null_pointer_exception": false,
+      "no_fatal_or_anr": false,
+      "logcat_clean": false
+    }
+  }
+}

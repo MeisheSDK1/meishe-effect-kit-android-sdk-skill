@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "aliases": {
+    "record": "recording",
+    "video-record": "recording",
+    "video-recording": "recording",
+    "录制": "recording",
+    "视频录制": "recording",
+    "录制功能": "recording",
+    "NVE 最终输出录制": "recording",
+    "NVE 处理后画面录制": "recording"
+  },
+  "capabilities": {
+    "recording": {
+      "reference": "references/recording.md",
+      "ui_module": "recording",
+      "ui_behavior": "bottom-center-action-no-panel",
+      "models": [],
+      "assets": [],
+      "intensity": false,
+      "host_capability": true,
+      "scope": "nve-final-output-only",
+      "proof_tokens": [
+        "MediaRecorder.VideoSource.SURFACE",
+        "eglPresentationTimeANDROID",
+        "MediaStore.MediaColumns.RELATIVE_PATH"
+      ]
+    }
+  },
+  "ui": {
+    "module_entry_order_with_recording": [
+      "beauty",
+      "makeup",
+      "recording",
+      "filter",
+      "face-prop"
+    ],
+    "recording_entry_position": "exact-center-equal-weight-slot",
+    "recording_entry_size_dp": [44, 44],
+    "recording_entry_shape": "circle-equal-width-height-gradientdrawable-oval",
+    "recording_icon_padding_dp": 6,
+    "recording_idle_content_description": "录制视频",
+    "recording_active_content_description": "停止录制",
+    "recording_status_presentation": "transient-message-no-persistent-overlay"
+  },
+  "manual_evidence": {
+    "recording_checks": [
+      "h264_track",
+      "audio_or_declared_silent",
+      "media_store_dcim_camera",
+      "system_player_open",
+      "timestamp_monotonic",
+      "preview_responsive",
+      "start_stop_feedback",
+      "background_stop_and_save",
+      "rollback_on_failure"
+    ]
+  }
+}

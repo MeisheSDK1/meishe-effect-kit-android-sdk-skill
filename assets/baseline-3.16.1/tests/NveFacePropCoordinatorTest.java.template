@@ -1,0 +1,48 @@
+package __TARGET_PACKAGE__;
+
+import org.junit.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+
+public class NveFacePropCoordinatorTest {
+    @Test
+    public void selectionSwitchAndClearApplyCompleteState() {
+        FakeBackend backend = new FakeBackend();
+        NveFacePropCoordinator coordinator = new NveFacePropCoordinator(backend);
+
+        coordinator.select("prop-a");
+        coordinator.select("prop-b");
+        coordinator.clear();
+
+        assertEquals("prop-a:true", backend.states.get(0));
+        assertEquals("prop-b:true", backend.states.get(1));
+        assertEquals(":false", backend.states.get(2));
+        assertNull(coordinator.desiredPackageId());
+    }
+
+    @Test
+    public void initializeRestoresDesiredSelection() {
+        FakeBackend backend = new FakeBackend();
+        NveFacePropCoordinator coordinator = new NveFacePropCoordinator(backend);
+
+        coordinator.select("prop-a");
+        coordinator.restoreAfterInitialize();
+
+        assertEquals(2, backend.states.size());
+        assertEquals("prop-a:true", backend.states.get(1));
+        assertEquals("prop-a", coordinator.desiredPackageId());
+    }
+
+    private static final class FakeBackend implements NveFacePropCoordinator.Backend {
+        final List<String> states = new ArrayList<>();
+
+        @Override
+        public void apply(String installedPackageId, boolean enabled) {
+            states.add(installedPackageId + ":" + enabled);
+        }
+    }
+}

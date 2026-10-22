@@ -1,0 +1,646 @@
+package __TARGET_PACKAGE__;
+
+import android.content.Context;
+import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.CompoundButton;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
+import android.widget.Switch;
+import android.widget.TextView;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Verified compact Beauty/Shape/MicroShape panel.
+ *
+ * This class owns UI state only. The host adapts catalog items through Item and serializes actual
+ * EffectKit writes through Listener. Selecting a tab/item never re-submits an existing value.
+ */
+final class NveCompactBeautyPanelView extends FrameLayout
+        implements NveCompactEffectEntryBar.Panel {
+    static final String SKIN = "skin";
+    static final String SHAPE = "shape";
+    static final String MICRO_SHAPE = "micro-shape";
+
+    interface Item {
+        String category();
+        String id();
+        String label();
+        float min();
+        float max();
+    }
+
+    interface Listener {
+        void onMasterChanged(boolean enabled);
+        void onValueChanged(Item item, float value);
+        void onReset();
+    }
+
+    // Keep the same visual tokens as Filter, FaceProp and Makeup panels.
+    private static final int COLOR_PANEL = 0xF21B1B24;
+    private static final int COLOR_SURFACE = 0xFF2A2A36;
+    private static final int COLOR_ACCENT = 0xFFFF6F9F;
+    private static final int COLOR_TEXT_PRIMARY = 0xFFFFFFFF;
+    private static final int COLOR_TEXT_SECONDARY = 0xFFB8B8C6;
+    private static final int COLOR_OUTLINE = 0x3DFFFFFF;
+    private static final int COLOR_FLAT_CONTROL = 0x14FFFFFF;
+    private static final int COLOR_FLAT_CONTROL_PRESSED = 0x2BFFFFFF;
+
+    private final List<? extends Item> items;
+    private final Listener listener;
+    private final Map<String, Float> values = new HashMap<>();
+    private final Map<String, Item> selectedByCategory = new HashMap<>();
+    private final Map<String, BeautyTabView> tabs = new HashMap<>();
+    private final Map<String, Bitmap> covers = new HashMap<>();
+    private final Set<String> unavailable = new HashSet<>();
+
+    private final LinearLayout panel;
+    private final LinearLayout chips;
+    private final HorizontalScrollView itemScroll;
+    private final Button entryButton;
+    private final Switch masterSwitch;
+    private final LinearLayout masterControl;
+    private final TextView valueLabel;
+    private final SeekBar intensity;
+    private String category = SKIN;
+    private boolean runtimeReady;
+    private boolean suppressSeekCallback;
+    private boolean panelExpanded;
+    private NveCompactEffectEntryBar.Panel.ExpansionListener expansionListener;
+
+    NveCompactBeautyPanelView(
+            Context context,
+            List<? extends Item> items,
+            Listener listener) {
+        super(context);
+        this.items = items;
+        this.listener = listener;
+        setClipChildren(false);
+
+        for (Item item : items) {
+            values.put(key(item), 0f);
+            if (!selectedByCategory.containsKey(item.category())) {
+                selectedByCategory.put(item.category(), item);
+            }
+        }
+
+        panel = new LinearLayout(context);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(8), dp(6), dp(8), dp(6));
+        panel.setBackground(rounded(COLOR_PANEL, 18, 1, COLOR_OUTLINE));
+        panel.setElevation(dp(10));
+        panel.setClickable(true);
+        panel.setVisibility(GONE);
+        setOnClickListener(view -> collapse());
+        setClickable(false);
+
+        entryButton = compactButton("美颜");
+        entryButton.setTextSize(12);
+        entryButton.setContentDescription("nve-beauty-entry");
+        entryButton.setElevation(dp(8));
+        entryButton.setOnClickListener(view ->
+                setPanelExpanded(!panelExpanded));
+        LayoutParams entryParams = new LayoutParams(
+                dp(68), dp(36), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        entryParams.bottomMargin = dp(8);
+        addView(entryButton, entryParams);
+
+        LinearLayout topRow = horizontalRow(40);
+        topRow.addView(tabView("美肤", SKIN), weightedParams(1f, 40));
+        topRow.addView(tabView("美型", SHAPE), weightedParams(1f, 40));
+        topRow.addView(
+                tabView("微整形", MICRO_SHAPE), weightedParams(1f, 40));
+        panel.addView(topRow);
+
+        masterSwitch = new Switch(context);
+        masterSwitch.setText(null);
+        masterSwitch.setTextColor(COLOR_TEXT_PRIMARY);
+        masterSwitch.setTextSize(12);
+        masterSwitch.setShowText(false);
+        masterSwitch.setSwitchMinWidth(dp(40));
+        masterSwitch.setChecked(true);
+        masterSwitch.setContentDescription("nve-beauty-master");
+        masterSwitch.setOnCheckedChangeListener(this::onMasterChecked);
+
+        itemScroll = new HorizontalScrollView(context);
+        itemScroll.setHorizontalScrollBarEnabled(false);
+        itemScroll.setFillViewport(false);
+        itemScroll.setOverScrollMode(OVER_SCROLL_NEVER);
+        chips = new LinearLayout(context);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        chips.setGravity(Gravity.CENTER_VERTICAL);
+        itemScroll.addView(chips, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        LinearLayout.LayoutParams itemScrollParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(60));
+        panel.addView(itemScroll, itemScrollParams);
+
+        LinearLayout valueRow = horizontalRow(40);
+        valueLabel = new TextView(context);
+        valueLabel.setTextColor(COLOR_TEXT_PRIMARY);
+        valueLabel.setTextSize(12);
+        valueLabel.setGravity(Gravity.CENTER);
+        valueRow.addView(valueLabel, new LinearLayout.LayoutParams(dp(58), dp(36)));
+
+        intensity = new SeekBar(context);
+        intensity.setMax(1000);
+        intensity.setContentDescription("nve-beauty-intensity");
+        intensity.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(
+                    SeekBar seekBar, int progress, boolean fromUser) {
+                Item item = currentItem();
+                if (item == null) {
+                    return;
+                }
+                float value = progressToValue(item, progress);
+                values.put(key(item), value);
+                updateValueLabel(item, value);
+                if (fromUser && !suppressSeekCallback
+                        && runtimeReady && !unavailable.contains(key(item))) {
+                    listener.onValueChanged(item, value);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+        valueRow.addView(intensity, weightedParams(1f, 36));
+
+        Button reset = flatActionButton("重置");
+        reset.setContentDescription("nve-beauty-reset");
+        reset.setOnClickListener(view -> resetAll());
+        LinearLayout.LayoutParams resetParams =
+                new LinearLayout.LayoutParams(dp(48), dp(30));
+        resetParams.leftMargin = dp(6);
+        resetParams.gravity = Gravity.CENTER_VERTICAL;
+        valueRow.addView(reset, resetParams);
+
+        masterControl = new LinearLayout(context);
+        masterControl.setOrientation(LinearLayout.HORIZONTAL);
+        masterControl.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView masterLabel = new TextView(context);
+        masterLabel.setText("开启");
+        masterLabel.setTextColor(COLOR_TEXT_PRIMARY);
+        masterLabel.setTextSize(12);
+        masterLabel.setGravity(Gravity.CENTER_VERTICAL);
+        masterLabel.setImportantForAccessibility(
+                View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        masterControl.addView(
+                masterLabel,
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)));
+
+        LinearLayout.LayoutParams innerSwitchParams =
+                new LinearLayout.LayoutParams(dp(44), dp(36));
+        innerSwitchParams.leftMargin = dp(4);
+        masterControl.addView(masterSwitch, innerSwitchParams);
+
+        LinearLayout.LayoutParams masterControlParams =
+                new LinearLayout.LayoutParams(dp(80), dp(36));
+        masterControlParams.leftMargin = dp(8);
+        valueRow.addView(masterControl, masterControlParams);
+
+        LinearLayout.LayoutParams valueRowParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+        panel.addView(valueRow, valueRowParams);
+
+        LayoutParams panelParams = new LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM);
+        panelParams.leftMargin = dp(10);
+        panelParams.rightMargin = dp(10);
+        addView(panel, panelParams);
+
+        updateEntryStyle(false);
+        updateTabStyles();
+        rebuildItemChips();
+        showCurrentValue();
+    }
+
+    void setRuntimeState(
+            boolean ready, String reason, Set<String> unavailableItemKeys) {
+        runtimeReady = ready;
+        unavailable.clear();
+        if (unavailableItemKeys != null) {
+            unavailable.addAll(unavailableItemKeys);
+        }
+        masterSwitch.setEnabled(ready);
+        masterControl.setAlpha(
+                ready ? (masterSwitch.isChecked() ? 1f : 0.72f) : 0.45f);
+        if (!ready) {
+            valueLabel.setText("--");
+            valueLabel.setContentDescription(
+                    reason == null ? "美颜尚未就绪" : reason);
+        } else {
+            showCurrentValue();
+        }
+        rebuildItemChips();
+    }
+
+    void setCovers(Map<String, Bitmap> itemCovers) {
+        covers.clear();
+        if (itemCovers != null) {
+            covers.putAll(itemCovers);
+        }
+        rebuildItemChips();
+    }
+
+    void setValue(
+            String targetCategory,
+            String targetId,
+            float rawValue,
+            boolean notifyListener) {
+        Item item = find(targetCategory, targetId);
+        if (item == null) {
+            throw new IllegalArgumentException(
+                    "unknown beauty item: " + targetCategory + "/" + targetId);
+        }
+        float value = clamp(rawValue, item.min(), item.max());
+        values.put(key(item), value);
+        if (notifyListener && runtimeReady && !unavailable.contains(key(item))) {
+            listener.onValueChanged(item, value);
+        }
+        if (item == currentItem()) {
+            showCurrentValue();
+        }
+    }
+
+    boolean isMasterEnabled() {
+        return masterSwitch.isChecked();
+    }
+
+    @Override
+    public View detachEntryButton() {
+        removeView(entryButton);
+        entryButton.setTranslationX(0f);
+        return entryButton;
+    }
+
+    @Override
+    public void setEntryVisible(boolean visible) {
+        entryButton.setVisibility(visible ? VISIBLE : GONE);
+    }
+
+    @Override
+    public void setExpansionListener(
+            NveCompactEffectEntryBar.Panel.ExpansionListener listener) {
+        expansionListener = listener;
+    }
+
+    @Override
+    public void collapse() {
+        if (panelExpanded) {
+            setPanelExpanded(false);
+        }
+    }
+
+    private void onMasterChecked(CompoundButton button, boolean checked) {
+        masterControl.setAlpha(checked ? 1f : 0.72f);
+        if (runtimeReady) {
+            listener.onMasterChanged(checked);
+        }
+        intensity.setEnabled(checked && currentItemAvailable());
+    }
+
+    private BeautyTabView tabView(String label, String targetCategory) {
+        BeautyTabView tab = new BeautyTabView(getContext(), label);
+        tab.setContentDescription("nve-beauty-tab-" + targetCategory);
+        tabs.put(targetCategory, tab);
+        tab.setOnClickListener(view -> {
+            category = targetCategory;
+            itemScroll.scrollTo(0, 0);
+            updateTabStyles();
+            rebuildItemChips();
+            showCurrentValue();
+        });
+        return tab;
+    }
+
+    private void rebuildItemChips() {
+        chips.removeAllViews();
+        Item selected = selectedByCategory.get(category);
+        for (Item item : items) {
+            if (!category.equals(item.category())) {
+                continue;
+            }
+            BeautyItemView chip = new BeautyItemView(
+                    getContext(), item.label(), covers.get(key(item)));
+            chip.setContentDescription(
+                    "nve-beauty-feature-" + item.category() + "-" + item.id());
+            boolean available = runtimeReady && !unavailable.contains(key(item));
+            chip.setEnabled(available);
+            chip.setAlpha(available ? 1f : 0.45f);
+            chip.setSelectionStyle(item == selected);
+            chip.setOnClickListener(view -> {
+                // Selection is UI-only: never call Listener.onValueChanged here.
+                selectedByCategory.put(category, item);
+                rebuildItemChips();
+                showCurrentValue();
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    dp(60), dp(60));
+            params.rightMargin = dp(4);
+            chips.addView(chip, params);
+        }
+    }
+
+    private void setPanelExpanded(boolean expanded) {
+        panelExpanded = expanded;
+        panel.setVisibility(expanded ? VISIBLE : GONE);
+        setClickable(expanded);
+        setEntryVisible(!expanded);
+        entryButton.setSelected(expanded);
+        updateEntryStyle(expanded);
+        if (expansionListener != null) {
+            expansionListener.onExpansionChanged(expanded);
+        }
+    }
+
+    private void updateEntryStyle(boolean selected) {
+        entryButton.setTextColor(COLOR_TEXT_PRIMARY);
+        entryButton.setBackground(rounded(
+                selected ? COLOR_ACCENT : COLOR_SURFACE,
+                18,
+                selected ? 0 : 1,
+                COLOR_OUTLINE));
+        entryButton.setElevation(dp(8));
+    }
+
+    private void updateTabStyles() {
+        for (Map.Entry<String, BeautyTabView> item : tabs.entrySet()) {
+            boolean selected = item.getKey().equals(category);
+            item.getValue().setSelectionStyle(selected);
+        }
+    }
+
+    private void showCurrentValue() {
+        Item item = currentItem();
+        if (item == null) {
+            intensity.setEnabled(false);
+            valueLabel.setText("--");
+            valueLabel.setContentDescription("无可用美颜功能");
+            return;
+        }
+        float value = values.containsKey(key(item)) ? values.get(key(item)) : 0f;
+        suppressSeekCallback = true;
+        intensity.setProgress(valueToProgress(item, value));
+        suppressSeekCallback = false;
+        intensity.setEnabled(masterSwitch.isChecked() && currentItemAvailable());
+        updateValueLabel(item, value);
+    }
+
+    private void resetAll() {
+        for (Item item : items) {
+            values.put(key(item), 0f);
+        }
+        if (runtimeReady) {
+            listener.onReset();
+        }
+        showCurrentValue();
+    }
+
+    private boolean currentItemAvailable() {
+        Item item = currentItem();
+        return runtimeReady && item != null && !unavailable.contains(key(item));
+    }
+
+    private Item currentItem() {
+        return selectedByCategory.get(category);
+    }
+
+    private Item find(String targetCategory, String targetId) {
+        for (Item item : items) {
+            if (targetCategory.equals(item.category()) && targetId.equals(item.id())) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    private void updateValueLabel(Item item, float value) {
+        valueLabel.setText(String.format(Locale.US, "%.2f", value));
+        valueLabel.setContentDescription(item.label() + "当前值");
+    }
+
+    private static String key(Item item) {
+        return item.category() + ":" + item.id();
+    }
+
+    private static int valueToProgress(Item item, float value) {
+        if (item.max() <= item.min()) {
+            return 0;
+        }
+        return Math.round(
+                (value - item.min()) * 1000f / (item.max() - item.min()));
+    }
+
+    private static float progressToValue(Item item, int progress) {
+        return item.min() + (item.max() - item.min()) * progress / 1000f;
+    }
+
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private LinearLayout horizontalRow(int heightDp) {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(heightDp)));
+        return row;
+    }
+
+    private LinearLayout.LayoutParams weightedParams(float weight, int heightDp) {
+        return new LinearLayout.LayoutParams(0, dp(heightDp), weight);
+    }
+
+    private Button compactButton(String text) {
+        Button button = new Button(getContext());
+        button.setText(text);
+        button.setTextColor(COLOR_TEXT_PRIMARY);
+        button.setAllCaps(false);
+        button.setGravity(Gravity.CENTER);
+        button.setStateListAnimator(null);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setPadding(dp(10), 0, dp(10), 0);
+        button.setBackground(rounded(COLOR_SURFACE, 14, 1, COLOR_OUTLINE));
+        return button;
+    }
+
+    private Button flatActionButton(String text) {
+        Button button = compactButton(text);
+        button.setTextSize(11);
+        button.setTextColor(COLOR_TEXT_SECONDARY);
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setElevation(0);
+
+        StateListDrawable states = new StateListDrawable();
+        states.addState(
+                new int[]{android.R.attr.state_pressed},
+                rounded(COLOR_FLAT_CONTROL_PRESSED, 8, 0, COLOR_OUTLINE));
+        states.addState(
+                new int[0],
+                rounded(COLOR_FLAT_CONTROL, 8, 0, COLOR_OUTLINE));
+        button.setBackground(states);
+        return button;
+    }
+
+    private final class BeautyTabView extends LinearLayout {
+        private final TextView title;
+        private final View indicator;
+
+        BeautyTabView(Context context, String text) {
+            super(context);
+            setOrientation(VERTICAL);
+            setGravity(Gravity.CENTER_HORIZONTAL);
+            setClickable(true);
+            setFocusable(true);
+            setPadding(dp(4), 0, dp(4), dp(3));
+
+            StateListDrawable background = new StateListDrawable();
+            background.addState(
+                    new int[]{android.R.attr.state_pressed},
+                    rounded(COLOR_FLAT_CONTROL, 8, 0, COLOR_OUTLINE));
+            background.addState(
+                    new int[0],
+                    rounded(0x00000000, 8, 0, COLOR_OUTLINE));
+            setBackground(background);
+
+            title = new TextView(context);
+            title.setText(text);
+            title.setTextSize(13);
+            title.setGravity(Gravity.CENTER);
+            title.setSingleLine(true);
+            addView(
+                    title,
+                    new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+            indicator = new View(context);
+            addView(indicator, new LinearLayout.LayoutParams(dp(28), dp(2)));
+        }
+
+        void setSelectionStyle(boolean selected) {
+            setSelected(selected);
+            title.setTextColor(
+                    selected ? COLOR_TEXT_PRIMARY : COLOR_TEXT_SECONDARY);
+            indicator.setBackgroundColor(
+                    selected ? COLOR_ACCENT : 0x00000000);
+        }
+    }
+
+    private final class BeautyItemView extends LinearLayout {
+        private final FrameLayout preview;
+        private final ImageView image;
+        private final TextView fallback;
+        private final TextView label;
+
+        BeautyItemView(Context context, String title, Bitmap cover) {
+            super(context);
+            setOrientation(VERTICAL);
+            setGravity(Gravity.CENTER);
+            setPadding(dp(2), 0, dp(2), 0);
+            setClickable(true);
+            setFocusable(true);
+
+            preview = new FrameLayout(context);
+            preview.setBackground(rounded(COLOR_SURFACE, 10, 1, COLOR_OUTLINE));
+
+            image = new ImageView(context);
+            image.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            image.setPadding(dp(4), dp(4), dp(4), dp(4));
+            image.setImageBitmap(cover);
+
+            fallback = new TextView(context);
+            fallback.setText(title.isEmpty() ? "·" : title.substring(0, 1));
+            fallback.setTextColor(COLOR_TEXT_SECONDARY);
+            fallback.setTextSize(16);
+            fallback.setGravity(Gravity.CENTER);
+
+            if (cover != null) {
+                preview.addView(
+                        image,
+                        new FrameLayout.LayoutParams(
+                                dp(38), dp(38), Gravity.CENTER));
+            } else {
+                preview.addView(
+                        fallback,
+                        new FrameLayout.LayoutParams(
+                                dp(38), dp(38), Gravity.CENTER));
+            }
+            addView(preview, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+            label = new TextView(context);
+            label.setText(title);
+            label.setTextColor(COLOR_TEXT_SECONDARY);
+            label.setTextSize(9);
+            label.setGravity(Gravity.CENTER);
+            label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.END);
+            addView(
+                    label,
+                    new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, dp(14)));
+        }
+
+        void setSelectionStyle(boolean selected) {
+            setSelected(selected);
+            int foreground = selected ? COLOR_ACCENT : COLOR_TEXT_SECONDARY;
+            label.setTextColor(
+                    selected ? COLOR_TEXT_PRIMARY : COLOR_TEXT_SECONDARY);
+            fallback.setTextColor(foreground);
+            image.setImageTintList(ColorStateList.valueOf(foreground));
+            preview.setBackground(rounded(
+                    COLOR_SURFACE,
+                    10,
+                    selected ? 2 : 1,
+                    selected ? COLOR_ACCENT : COLOR_OUTLINE));
+        }
+    }
+
+    private GradientDrawable rounded(
+            int color, int radiusDp, int strokeWidthDp, int strokeColor) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radiusDp));
+        if (strokeWidthDp > 0) {
+            drawable.setStroke(dp(strokeWidthDp), strokeColor);
+        }
+        return drawable;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+}

@@ -1,0 +1,449 @@
+package __TARGET_PACKAGE__;
+
+import android.content.Context;
+import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
+import android.widget.TextView;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * Compact packaged-filter validation panel. Covers must be decoded on the resource worker;
+ * this view performs no assets, file, or network I/O.
+ */
+final class NveCompactFilterPanelView extends FrameLayout
+        implements NveCompactEffectEntryBar.Panel {
+    interface Item {
+        String id();
+        String label();
+        Bitmap cover();
+        boolean available();
+    }
+
+    interface Listener {
+        void onFilterSelected(Item item, float intensity);
+        void onFilterCleared();
+        void onIntensityChanged(float intensity);
+    }
+
+    private static final int COLOR_PANEL = 0xF21B1B24;
+    private static final int COLOR_SURFACE = 0xFF2A2A36;
+    private static final int COLOR_ACCENT = 0xFFFF6F9F;
+    private static final int COLOR_TEXT = 0xFFFFFFFF;
+    private static final int COLOR_SECONDARY = 0xFFB8B8C6;
+    private static final int COLOR_OUTLINE = 0x3DFFFFFF;
+    private static final int COLOR_FLAT_CONTROL = 0x14FFFFFF;
+    private static final int COLOR_FLAT_CONTROL_PRESSED = 0x2BFFFFFF;
+    private static final float DEFAULT_INTENSITY = 0.5f;
+
+    private final Listener listener;
+    private final LinearLayout panel;
+    private final LinearLayout itemsRow;
+    private final Button entryButton;
+    private final SeekBar intensity;
+    private final TextView valueLabel;
+    private final Button resetButton;
+    private final TextView status;
+    private final Map<String, FilterItemView> itemViews = new LinkedHashMap<>();
+    private final Map<String, Item> itemsById = new LinkedHashMap<>();
+    private FilterItemView noneItem;
+    private String selectedItemId;
+    private float desiredIntensity = DEFAULT_INTENSITY;
+    private boolean runtimeReady;
+    private boolean suppressIntensityCallback;
+    private String catalogStatus;
+    private NveCompactEffectEntryBar.Panel.ExpansionListener expansionListener;
+
+    NveCompactFilterPanelView(
+            Context context, int noneIconResource, Listener listener) {
+        super(context);
+        this.listener = listener;
+        setClipChildren(false);
+
+        panel = new LinearLayout(context);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(8), dp(6), dp(8), dp(6));
+        panel.setBackground(rounded(COLOR_PANEL, 18, 1, COLOR_OUTLINE));
+        panel.setElevation(dp(10));
+        panel.setClickable(true);
+        panel.setVisibility(GONE);
+        setOnClickListener(view -> collapse());
+        setClickable(false);
+
+        entryButton = button("滤镜");
+        entryButton.setContentDescription("nve-filter-entry");
+        entryButton.setOnClickListener(view ->
+                setPanelExpanded(panel.getVisibility() != VISIBLE));
+        LayoutParams entryParams = new LayoutParams(
+                dp(68), dp(36), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        entryParams.bottomMargin = dp(8);
+        addView(entryButton, entryParams);
+
+        HorizontalScrollView scroller = new HorizontalScrollView(context);
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setOverScrollMode(OVER_SCROLL_NEVER);
+        itemsRow = new LinearLayout(context);
+        itemsRow.setOrientation(LinearLayout.HORIZONTAL);
+        itemsRow.setGravity(Gravity.CENTER_VERTICAL);
+        noneItem = new FilterItemView(context, "无", noneIconResource);
+        noneItem.setContentDescription("nve-filter-none");
+        noneItem.setOnClickListener(view -> clearSelection(true));
+        itemsRow.addView(noneItem, itemParams());
+        scroller.addView(itemsRow, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        panel.addView(scroller, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(68)));
+
+        LinearLayout valueRow = new LinearLayout(context);
+        valueRow.setOrientation(LinearLayout.HORIZONTAL);
+        valueRow.setGravity(Gravity.CENTER_VERTICAL);
+        valueLabel = new TextView(context);
+        valueLabel.setTextColor(COLOR_TEXT);
+        valueLabel.setTextSize(12);
+        valueLabel.setGravity(Gravity.CENTER);
+        valueLabel.setContentDescription("nve-filter-current-value");
+        valueRow.addView(valueLabel, new LinearLayout.LayoutParams(dp(58), dp(36)));
+        intensity = new SeekBar(context);
+        intensity.setMax(1000);
+        intensity.setContentDescription("nve-filter-intensity");
+        intensity.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                desiredIntensity = progress / 1000f;
+                updateValue();
+                if (fromUser && !suppressIntensityCallback && selectedItemId != null) {
+                    listener.onIntensityChanged(desiredIntensity);
+                }
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        valueRow.addView(intensity, new LinearLayout.LayoutParams(0, dp(40), 1f));
+        resetButton = flatActionButton("重置");
+        resetButton.setContentDescription("nve-filter-reset");
+        resetButton.setOnClickListener(
+                view -> setIntensity(DEFAULT_INTENSITY, true));
+        LinearLayout.LayoutParams resetParams =
+                new LinearLayout.LayoutParams(dp(48), dp(30));
+        resetParams.leftMargin = dp(6);
+        resetParams.gravity = Gravity.CENTER_VERTICAL;
+        valueRow.addView(resetButton, resetParams);
+        panel.addView(valueRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40)));
+
+        status = new TextView(context);
+        status.setTextColor(COLOR_SECONDARY);
+        status.setTextSize(11);
+        status.setSingleLine(true);
+        status.setVisibility(GONE);
+        panel.addView(status, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(24)));
+
+        LayoutParams panelParams = new LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM);
+        panelParams.leftMargin = dp(10);
+        panelParams.rightMargin = dp(10);
+        addView(panel, panelParams);
+        setIntensity(DEFAULT_INTENSITY, false);
+        updateSelectionStyles();
+        updateEntryStyle(false);
+        setRuntimeState(false, "滤镜资源初始化中");
+    }
+
+    void setItems(List<? extends Item> items, String resultStatus) {
+        for (FilterItemView view : itemViews.values()) {
+            itemsRow.removeView(view);
+        }
+        itemViews.clear();
+        itemsById.clear();
+        catalogStatus = resultStatus;
+        for (Item item : items) {
+            FilterItemView view = new FilterItemView(
+                    getContext(), item.label(), item.cover());
+            view.setContentDescription(
+                    "nve-filter-item-" + item.id().toLowerCase(Locale.US));
+            view.setOnClickListener(ignored -> selectItem(item.id(), true));
+            itemViews.put(item.id(), view);
+            itemsById.put(item.id(), item);
+            itemsRow.addView(view, itemParams());
+        }
+        if (selectedItemId != null && !itemsById.containsKey(selectedItemId)) {
+            selectedItemId = null;
+            listener.onFilterCleared();
+        }
+        refreshEnabledState();
+        updateSelectionStyles();
+        updateStatus(null);
+    }
+
+    void setRuntimeState(boolean ready, String reason) {
+        runtimeReady = ready;
+        refreshEnabledState();
+        updateStatus(ready ? null : reason);
+    }
+
+    @Override
+    public View detachEntryButton() {
+        removeView(entryButton);
+        entryButton.setTranslationX(0f);
+        return entryButton;
+    }
+
+    @Override
+    public void setEntryVisible(boolean visible) {
+        entryButton.setVisibility(visible ? VISIBLE : GONE);
+    }
+
+    @Override
+    public void setExpansionListener(
+            NveCompactEffectEntryBar.Panel.ExpansionListener listener) {
+        expansionListener = listener;
+    }
+
+    @Override
+    public void collapse() {
+        if (panel.getVisibility() == VISIBLE) {
+            setPanelExpanded(false);
+        }
+    }
+
+    private void selectItem(String id, boolean notify) {
+        Item item = itemsById.get(id);
+        if (!runtimeReady || item == null || !item.available()) {
+            return;
+        }
+        selectedItemId = id;
+        refreshEnabledState();
+        updateSelectionStyles();
+        if (notify) {
+            listener.onFilterSelected(item, desiredIntensity);
+        }
+    }
+
+    private void clearSelection(boolean notify) {
+        if (!runtimeReady) {
+            return;
+        }
+        selectedItemId = null;
+        refreshEnabledState();
+        updateSelectionStyles();
+        if (notify) {
+            listener.onFilterCleared();
+        }
+    }
+
+    private void setIntensity(float value, boolean notify) {
+        desiredIntensity = Math.max(0f, Math.min(1f, value));
+        suppressIntensityCallback = true;
+        intensity.setProgress(Math.round(desiredIntensity * 1000f));
+        suppressIntensityCallback = false;
+        updateValue();
+        if (notify && selectedItemId != null) {
+            listener.onIntensityChanged(desiredIntensity);
+        }
+    }
+
+    private void refreshEnabledState() {
+        noneItem.setEnabled(runtimeReady);
+        noneItem.setAlpha(runtimeReady ? 1f : 0.45f);
+        boolean adjustmentEnabled = runtimeReady && selectedItemId != null;
+        intensity.setEnabled(adjustmentEnabled);
+        intensity.setAlpha(adjustmentEnabled ? 1f : 0.45f);
+        resetButton.setEnabled(adjustmentEnabled);
+        resetButton.setAlpha(adjustmentEnabled ? 1f : 0.45f);
+        for (Map.Entry<String, FilterItemView> entry : itemViews.entrySet()) {
+            Item item = itemsById.get(entry.getKey());
+            boolean enabled = runtimeReady && item != null && item.available();
+            entry.getValue().setEnabled(enabled);
+            entry.getValue().setAlpha(enabled ? 1f : 0.45f);
+        }
+    }
+
+    private void updateSelectionStyles() {
+        noneItem.setSelectionStyle(selectedItemId == null);
+        for (Map.Entry<String, FilterItemView> entry : itemViews.entrySet()) {
+            entry.getValue().setSelectionStyle(entry.getKey().equals(selectedItemId));
+        }
+    }
+
+    private void updateValue() {
+        valueLabel.setText(String.format(Locale.US, "%.2f", desiredIntensity));
+    }
+
+    private void updateStatus(String runtimeReason) {
+        String message = runtimeReason != null ? runtimeReason : catalogStatus;
+        status.setVisibility(message == null ? GONE : VISIBLE);
+        status.setText(message == null ? "" : message);
+    }
+
+    private void setPanelExpanded(boolean expanded) {
+        panel.setVisibility(expanded ? VISIBLE : GONE);
+        setClickable(expanded);
+        setEntryVisible(!expanded);
+        entryButton.setSelected(expanded);
+        updateEntryStyle(expanded);
+        if (expansionListener != null) {
+            expansionListener.onExpansionChanged(expanded);
+        }
+    }
+
+    private void updateEntryStyle(boolean selected) {
+        entryButton.setBackground(rounded(
+                selected ? COLOR_ACCENT : COLOR_SURFACE,
+                18,
+                selected ? 0 : 1,
+                COLOR_OUTLINE));
+    }
+
+    private LinearLayout.LayoutParams itemParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(60), dp(68));
+        params.rightMargin = dp(6);
+        return params;
+    }
+
+    private Button button(String text) {
+        Button button = new Button(getContext());
+        button.setText(text);
+        button.setTextColor(COLOR_TEXT);
+        button.setTextSize(12);
+        button.setAllCaps(false);
+        button.setStateListAnimator(null);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setBackground(rounded(COLOR_SURFACE, 14, 1, COLOR_OUTLINE));
+        return button;
+    }
+
+    private Button flatActionButton(String text) {
+        Button button = button(text);
+        button.setTextSize(11);
+        button.setTextColor(COLOR_SECONDARY);
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setElevation(0);
+
+        StateListDrawable background = new StateListDrawable();
+        background.addState(
+                new int[] {android.R.attr.state_pressed},
+                rounded(COLOR_FLAT_CONTROL_PRESSED, 8, 0, COLOR_OUTLINE));
+        background.addState(
+                new int[0],
+                rounded(COLOR_FLAT_CONTROL, 8, 0, COLOR_OUTLINE));
+        button.setBackground(background);
+        return button;
+    }
+
+    private final class FilterItemView extends LinearLayout {
+        private final FrameLayout preview;
+        private final ImageView image;
+        private final TextView label;
+        private final boolean tintImage;
+
+        FilterItemView(Context context, String title, Bitmap cover) {
+            this(context, title, cover, 0);
+        }
+
+        FilterItemView(Context context, String title, int iconResource) {
+            this(context, title, null, iconResource);
+        }
+
+        private FilterItemView(
+                Context context,
+                String title,
+                Bitmap cover,
+                int iconResource) {
+            super(context);
+            setOrientation(VERTICAL);
+            setGravity(Gravity.CENTER);
+            setPadding(dp(4), 0, dp(4), 0);
+            setClickable(true);
+            setFocusable(true);
+
+            preview = new FrameLayout(context);
+            preview.setBackground(rounded(COLOR_SURFACE, 10, 1, COLOR_OUTLINE));
+
+            tintImage = iconResource != 0;
+            image = new ImageView(context);
+            image.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            image.setBackground(rounded(COLOR_SURFACE, 8, 0, COLOR_OUTLINE));
+            image.setClipToOutline(true);
+            if (cover != null) {
+                image.setImageBitmap(cover);
+                image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            } else if (iconResource != 0) {
+                image.setImageResource(iconResource);
+                image.setScaleType(ImageView.ScaleType.CENTER);
+                image.setPadding(dp(10), dp(10), dp(10), dp(10));
+            }
+            preview.addView(
+                    image,
+                    new FrameLayout.LayoutParams(
+                            dp(44), dp(44), Gravity.CENTER));
+            addView(preview, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+            label = new TextView(context);
+            label.setText(title);
+            label.setTextColor(COLOR_SECONDARY);
+            label.setTextSize(10);
+            label.setGravity(Gravity.CENTER);
+            label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams labelParams =
+                    new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, dp(16));
+            labelParams.topMargin = dp(1);
+            addView(label, labelParams);
+        }
+
+        void setSelectionStyle(boolean selected) {
+            setSelected(selected);
+            label.setTextColor(selected ? COLOR_TEXT : COLOR_SECONDARY);
+            preview.setBackground(rounded(
+                    COLOR_SURFACE,
+                    10,
+                    selected ? 2 : 1,
+                    selected ? COLOR_ACCENT : COLOR_OUTLINE));
+            if (tintImage) {
+                image.setImageTintList(ColorStateList.valueOf(
+                        selected ? COLOR_TEXT : COLOR_SECONDARY));
+            }
+        }
+    }
+
+    private GradientDrawable rounded(
+            int color, int radiusDp, int strokeWidthDp, int strokeColor) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radiusDp));
+        if (strokeWidthDp > 0) {
+            drawable.setStroke(dp(strokeWidthDp), strokeColor);
+        }
+        return drawable;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+}

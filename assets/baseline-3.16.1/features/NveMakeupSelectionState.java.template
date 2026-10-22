@@ -1,0 +1,218 @@
+package __TARGET_PACKAGE__;
+
+import com.meishe.nveffectkit.makeup.NveMakeupTypeEnum;
+
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Pure Java selection state shared by the default makeup UI and host lifecycle owner.
+ *
+ * A compose makeup remains selected while at least one category is still inherited from it.
+ * Explicit single selections replace only their own category.
+ */
+final class NveMakeupSelectionState {
+    private static final String COMPOSE_COMPONENT_ID = "__compose_component__";
+
+    static final class Snapshot {
+        private final EnumMap<NveMakeupTypeEnum, String> selectedSingles;
+        private final EnumMap<NveMakeupTypeEnum, String> preComposeSingles;
+        private final String selectedComposeId;
+        private final boolean composeDecomposed;
+        private final long revision;
+
+        private Snapshot(
+                EnumMap<NveMakeupTypeEnum, String> selectedSingles,
+                EnumMap<NveMakeupTypeEnum, String> preComposeSingles,
+                String selectedComposeId,
+                boolean composeDecomposed,
+                long revision) {
+            this.selectedSingles = new EnumMap<>(selectedSingles);
+            this.preComposeSingles = new EnumMap<>(preComposeSingles);
+            this.selectedComposeId = selectedComposeId;
+            this.composeDecomposed = composeDecomposed;
+            this.revision = revision;
+        }
+    }
+
+    private final EnumMap<NveMakeupTypeEnum, String> selectedSingles =
+            new EnumMap<>(NveMakeupTypeEnum.class);
+    private final EnumMap<NveMakeupTypeEnum, String> preComposeSingles =
+            new EnumMap<>(NveMakeupTypeEnum.class);
+    private String selectedComposeId;
+    private boolean composeDecomposed;
+    private long revision;
+
+    String selectedComposeId() {
+        return selectedComposeId;
+    }
+
+    boolean isComposeSelected() {
+        return selectedComposeId != null;
+    }
+
+    boolean isComposeDecomposed() {
+        return composeDecomposed;
+    }
+
+    long revision() {
+        return revision;
+    }
+
+    String selectedSingleId(NveMakeupTypeEnum type) {
+        String selected = selectedSingles.get(type);
+        return COMPOSE_COMPONENT_ID.equals(selected) ? null : selected;
+    }
+
+    boolean hasCategorySelection(NveMakeupTypeEnum type) {
+        return selectedSingles.containsKey(type);
+    }
+
+    boolean isInheritedFromCompose(NveMakeupTypeEnum type) {
+        return COMPOSE_COMPONENT_ID.equals(selectedSingles.get(type));
+    }
+
+    Set<NveMakeupTypeEnum> inheritedComposeTypes() {
+        EnumSet<NveMakeupTypeEnum> result =
+                EnumSet.noneOf(NveMakeupTypeEnum.class);
+        for (Map.Entry<NveMakeupTypeEnum, String> entry : selectedSingles.entrySet()) {
+            if (COMPOSE_COMPONENT_ID.equals(entry.getValue())) {
+                result.add(entry.getKey());
+            }
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    Map<NveMakeupTypeEnum, String> explicitSingleSelections() {
+        EnumMap<NveMakeupTypeEnum, String> result =
+                new EnumMap<>(NveMakeupTypeEnum.class);
+        for (Map.Entry<NveMakeupTypeEnum, String> entry : selectedSingles.entrySet()) {
+            if (!COMPOSE_COMPONENT_ID.equals(entry.getValue())) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
+    /**
+     * Selects or switches a compose makeup. Selecting the same compose again clears the base.
+     */
+    void selectCompose(
+            String composeId,
+            Set<NveMakeupTypeEnum> componentTypes) {
+        if (composeId == null || composeId.trim().isEmpty()) {
+            throw new IllegalArgumentException("composeId must not be empty");
+        }
+        if (componentTypes == null || componentTypes.isEmpty()) {
+            throw new IllegalArgumentException("compose componentTypes must not be empty");
+        }
+        if (composeId.equals(selectedComposeId)) {
+            clearCompose();
+            return;
+        }
+
+        if (selectedComposeId == null) {
+            preComposeSingles.clear();
+            preComposeSingles.putAll(explicitSingleSelections());
+        } else if (composeDecomposed) {
+            preComposeSingles.clear();
+            preComposeSingles.putAll(explicitSingleSelections());
+        }
+
+        selectedSingles.clear();
+        for (NveMakeupTypeEnum type : componentTypes) {
+            if (type != null) {
+                selectedSingles.put(type, COMPOSE_COMPONENT_ID);
+            }
+        }
+        selectedComposeId = composeId;
+        composeDecomposed = false;
+        revision++;
+    }
+
+    void selectSingle(NveMakeupTypeEnum type, String itemId) {
+        requireType(type);
+        if (itemId == null || itemId.trim().isEmpty()) {
+            clearSingle(type);
+            return;
+        }
+        selectedSingles.put(type, itemId);
+        onComposeCategoryEdited();
+        revision++;
+    }
+
+    void clearSingle(NveMakeupTypeEnum type) {
+        requireType(type);
+        selectedSingles.remove(type);
+        onComposeCategoryEdited();
+        revision++;
+    }
+
+    /**
+     * Clears only still-inherited compose categories after decomposition. Explicit singles stay.
+     */
+    void clearCompose() {
+        if (selectedComposeId == null) {
+            return;
+        }
+        if (composeDecomposed) {
+            EnumSet<NveMakeupTypeEnum> inherited =
+                    EnumSet.noneOf(NveMakeupTypeEnum.class);
+            inherited.addAll(inheritedComposeTypes());
+            for (NveMakeupTypeEnum type : inherited) {
+                selectedSingles.remove(type);
+            }
+            preComposeSingles.clear();
+        } else {
+            selectedSingles.clear();
+            selectedSingles.putAll(preComposeSingles);
+            preComposeSingles.clear();
+        }
+        selectedComposeId = null;
+        composeDecomposed = false;
+        revision++;
+    }
+
+    Snapshot snapshot() {
+        return new Snapshot(
+                selectedSingles,
+                preComposeSingles,
+                selectedComposeId,
+                composeDecomposed,
+                revision);
+    }
+
+    void restore(Snapshot snapshot) {
+        if (snapshot == null) {
+            throw new IllegalArgumentException("snapshot must not be null");
+        }
+        selectedSingles.clear();
+        selectedSingles.putAll(snapshot.selectedSingles);
+        preComposeSingles.clear();
+        preComposeSingles.putAll(snapshot.preComposeSingles);
+        selectedComposeId = snapshot.selectedComposeId;
+        composeDecomposed = snapshot.composeDecomposed;
+        revision = snapshot.revision;
+    }
+
+    private void onComposeCategoryEdited() {
+        if (selectedComposeId == null) {
+            return;
+        }
+        composeDecomposed = true;
+        preComposeSingles.clear();
+        if (inheritedComposeTypes().isEmpty()) {
+            selectedComposeId = null;
+            composeDecomposed = false;
+        }
+    }
+
+    private static void requireType(NveMakeupTypeEnum type) {
+        if (type == null) {
+            throw new IllegalArgumentException("makeup type must not be null");
+        }
+    }
+}

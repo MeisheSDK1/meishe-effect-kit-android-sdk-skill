@@ -1,0 +1,372 @@
+package __TARGET_PACKAGE__;
+
+import com.meicam.effect.sdk.NvsEffectSdkContext;
+import com.meishe.nveffectkit.NveEffectKit;
+import com.meishe.nveffectkit.beauty.NveBeauty;
+import com.meishe.nveffectkit.beauty.NveBeautyBlurTypeEnum;
+import com.meishe.nveffectkit.beauty.NveBeautyWhiteningTypeEnum;
+import com.meishe.nveffectkit.microShape.NveMicroShape;
+import com.meishe.nveffectkit.microShape.NveMicroShapeData;
+import com.meishe.nveffectkit.microShape.NveMicroShapeTypeEnum;
+import com.meishe.nveffectkit.shape.NveShape;
+import com.meishe.nveffectkit.shape.NveShapeData;
+import com.meishe.nveffectkit.shape.NveShapeTypeEnum;
+
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.Map;
+
+/** Complete baseline Beauty/Shape/MicroShape controller set; bind UI from feature-catalog.json. */
+final class NveBeautyCoordinator {
+    static final NveShapeTypeEnum[] SHAPE_TYPES = {
+            NveShapeTypeEnum.FACE_WIDTH, NveShapeTypeEnum.FACE_LENGTH,
+            NveShapeTypeEnum.FACE_SIZE, NveShapeTypeEnum.FORE_HEAD,
+            NveShapeTypeEnum.CHIN, NveShapeTypeEnum.EYE_SIZE,
+            NveShapeTypeEnum.EYE_ANGLE, NveShapeTypeEnum.NOSE_WIDTH,
+            NveShapeTypeEnum.NOSE_LENGTH, NveShapeTypeEnum.MOUTH_SIZE,
+            NveShapeTypeEnum.MOUTH_CORNER
+    };
+
+    static final NveMicroShapeTypeEnum[] MICRO_SHAPE_TYPES = {
+            NveMicroShapeTypeEnum.HEAD_SIZE, NveMicroShapeTypeEnum.CHEEKBONE_WIDTH,
+            NveMicroShapeTypeEnum.JAW_WIDTH, NveMicroShapeTypeEnum.TEMPLE_WIDTH,
+            NveMicroShapeTypeEnum.NASOLABIAL_FOLDS, NveMicroShapeTypeEnum.DARK_CIRCLES,
+            NveMicroShapeTypeEnum.BRIGHTEN_EYES, NveMicroShapeTypeEnum.WHITEN_TEETH,
+            NveMicroShapeTypeEnum.EYE_ANGLE_DEGREE, NveMicroShapeTypeEnum.EYE_DISTANCE,
+            NveMicroShapeTypeEnum.EYE_HEIGHT, NveMicroShapeTypeEnum.EYE_WIDTH,
+            NveMicroShapeTypeEnum.EYE_ARC, NveMicroShapeTypeEnum.EYE_Y_OFFSET,
+            NveMicroShapeTypeEnum.PHILTRUM, NveMicroShapeTypeEnum.NOSE_BRIDGE_WIDTH,
+            NveMicroShapeTypeEnum.NOSE_HEAD, NveMicroShapeTypeEnum.EYEBROW_THICKNESS,
+            NveMicroShapeTypeEnum.EYEBROW_ANGLE, NveMicroShapeTypeEnum.EYEBROW_Y_OFFSET,
+            NveMicroShapeTypeEnum.EYEBROW_X_OFFSET
+    };
+
+    private final NveBeauty beauty = new NveBeauty();
+    private final NveShape shape = new NveShape();
+    private final NveMicroShape microShape = new NveMicroShape();
+    private final EnumMap<NveShapeTypeEnum, String> shapePackages =
+            new EnumMap<>(NveShapeTypeEnum.class);
+    private final EnumMap<NveMicroShapeTypeEnum, String> microPackages =
+            new EnumMap<>(NveMicroShapeTypeEnum.class);
+    private final EnumMap<NveShapeTypeEnum, Float> appliedShapeValues =
+            new EnumMap<>(NveShapeTypeEnum.class);
+    private final EnumMap<NveMicroShapeTypeEnum, Float> appliedMicroShapeValues =
+            new EnumMap<>(NveMicroShapeTypeEnum.class);
+    private final EnumMap<NveShapeTypeEnum, Float> desiredShapeValues =
+            new EnumMap<>(NveShapeTypeEnum.class);
+    private final EnumMap<NveMicroShapeTypeEnum, Float> desiredMicroShapeValues =
+            new EnumMap<>(NveMicroShapeTypeEnum.class);
+    private final Map<String, Float> desiredSkinValues = new HashMap<>();
+    private final Map<String, Float> appliedSkinValues = new HashMap<>();
+    private boolean masterEnabled = true;
+    private String activeBlur = "buffing-skin";
+    private String activeWhitening = "whitening-a";
+    private String appliedBlur;
+    private String appliedWhitening;
+
+    void registerInBaselineOrder(NveEffectKit effectKit) {
+        // cleanUp invalidates the SDK's internal effects for all three controllers.
+        // Re-register each controller before touching its enabled state.
+        effectKit.setBeauty(beauty);
+        beauty.setEnable(true); // Neutral Beauty is also the shared AR Scene anchor.
+        effectKit.setShape(shape);
+        shape.setEnable(true);
+        effectKit.setMicroShape(microShape);
+        microShape.setEnable(true);
+        applyCurrentMasterState();
+    }
+
+    void setSkin(String id, float rawValue) {
+        float value = clamp(rawValue, 0f, "sharpness".equals(id) ? 10f : 1f);
+        switch (id) {
+            case "buffing-skin":
+            case "advanced-buffing-1":
+            case "advanced-buffing-2":
+            case "advanced-buffing-3":
+                activeBlur = id;
+                break;
+            case "advanced-buffing-4":
+                if (!supportsAdvancedBuffing4()) {
+                    throw new IllegalStateException(
+                            "AdvancedBuffingSkin4 requires high CPU level");
+                }
+                activeBlur = id;
+                break;
+            case "whitening-a":
+            case "whitening-b":
+                activeWhitening = id;
+                break;
+            case "matte":
+            case "matte-fill-radius":
+            case "reddening":
+            case "definition":
+            case "sharpness":
+                break;
+            default:
+                throw new IllegalArgumentException("unknown beauty item: " + id);
+        }
+        desiredSkinValues.put(id, value);
+        if (masterEnabled) {
+            applySkin(id, value);
+        }
+    }
+
+    private void applySkin(String id, float value) {
+        boolean selectorChanged =
+                shouldChangeSkinSelector(id, appliedBlur, appliedWhitening);
+        Float previous = appliedSkinValues.get(id);
+        if (!selectorChanged && previous != null
+                && Float.compare(previous, value) == 0) {
+            return;
+        }
+
+        switch (id) {
+            case "buffing-skin":
+                if (selectorChanged) {
+                    beauty.setBlurType(NveBeautyBlurTypeEnum.BuffingSkin);
+                }
+                beauty.setBlurIntensity(value);
+                appliedBlur = id;
+                break;
+            case "advanced-buffing-1":
+                if (selectorChanged) {
+                    beauty.setBlurType(NveBeautyBlurTypeEnum.AdvancedBuffingSkin1);
+                }
+                beauty.setBlurIntensity(value);
+                appliedBlur = id;
+                break;
+            case "advanced-buffing-2":
+                if (selectorChanged) {
+                    beauty.setBlurType(NveBeautyBlurTypeEnum.AdvancedBuffingSkin2);
+                }
+                beauty.setBlurIntensity(value);
+                appliedBlur = id;
+                break;
+            case "advanced-buffing-3":
+                if (selectorChanged) {
+                    beauty.setBlurType(NveBeautyBlurTypeEnum.AdvancedBuffingSkin3);
+                }
+                beauty.setBlurIntensity(value);
+                appliedBlur = id;
+                break;
+            case "advanced-buffing-4":
+                if (!supportsAdvancedBuffing4()) {
+                    throw new IllegalStateException(
+                            "AdvancedBuffingSkin4 requires high CPU level");
+                }
+                if (selectorChanged) {
+                    beauty.setBlurType(NveBeautyBlurTypeEnum.AdvancedBuffingSkin4);
+                }
+                beauty.setBlurIntensity(value);
+                appliedBlur = id;
+                break;
+            case "whitening-a":
+                if (selectorChanged) {
+                    beauty.setWhiteningType(NveBeautyWhiteningTypeEnum.WhiteningA);
+                }
+                beauty.setWhiteningIntensity(value);
+                appliedWhitening = id;
+                break;
+            case "whitening-b":
+                if (selectorChanged) {
+                    beauty.setWhiteningType(NveBeautyWhiteningTypeEnum.WhiteningB);
+                }
+                beauty.setWhiteningIntensity(value);
+                appliedWhitening = id;
+                break;
+            case "matte": beauty.setMatteIntensity(value); break;
+            case "matte-fill-radius": beauty.setMatteFillRadius(value); break;
+            case "reddening": beauty.setReddeningIntensity(value); break;
+            case "definition": beauty.setDefinitionIntensity(value); break;
+            case "sharpness": beauty.setSharpnessIntensity(value); break;
+            default: throw new IllegalArgumentException("unknown beauty item: " + id);
+        }
+        appliedSkinValues.put(id, value);
+    }
+
+    void registerShapePackage(NveShapeTypeEnum type, String installedPackageId) {
+        if (installedPackageId == null || installedPackageId.trim().isEmpty()) {
+            throw new IllegalArgumentException("empty shape package id: " + type);
+        }
+        shapePackages.put(type, installedPackageId);
+        shape.setShapeData(type, new NveShapeData(0f, installedPackageId));
+        appliedShapeValues.put(type, 0f);
+        if (!desiredShapeValues.containsKey(type)) {
+            desiredShapeValues.put(type, 0f);
+        }
+        applyShape(type, effectiveValue(desiredShapeValues.get(type)));
+    }
+
+    void setShape(NveShapeTypeEnum type, float value) {
+        if (!shapePackages.containsKey(type)) {
+            throw new IllegalStateException("shape package is not ready: " + type);
+        }
+        float applied = clamp(value, -1f, 1f);
+        desiredShapeValues.put(type, applied);
+        if (masterEnabled) {
+            applyShape(type, applied);
+        }
+    }
+
+    private void applyShape(NveShapeTypeEnum type, float applied) {
+        Float previous = appliedShapeValues.get(type);
+        if (previous != null && Float.compare(previous, applied) == 0) {
+            return;
+        }
+        shape.setDegreeByType(type, applied);
+        appliedShapeValues.put(type, applied);
+    }
+
+    void registerMicroShapePackage(
+            NveMicroShapeTypeEnum type, String installedPackageId) {
+        if (installedPackageId == null || installedPackageId.trim().isEmpty()) {
+            throw new IllegalArgumentException("empty micro-shape package id: " + type);
+        }
+        microPackages.put(type, installedPackageId);
+        microShape.setMicroShapeData(
+                type, new NveMicroShapeData(0f, installedPackageId));
+        appliedMicroShapeValues.put(type, 0f);
+        if (!desiredMicroShapeValues.containsKey(type)) {
+            desiredMicroShapeValues.put(type, 0f);
+        }
+        applyMicroShape(type, effectiveValue(desiredMicroShapeValues.get(type)));
+    }
+
+    void setMicroShape(NveMicroShapeTypeEnum type, float value) {
+        if (!isPositiveOnly(type) && !microPackages.containsKey(type)) {
+            throw new IllegalStateException("micro-shape package is not ready: " + type);
+        }
+        float min = isPositiveOnly(type) ? 0f : -1f;
+        float applied = clamp(value, min, 1f);
+        desiredMicroShapeValues.put(type, applied);
+        if (masterEnabled) {
+            applyMicroShape(type, applied);
+        }
+    }
+
+    private void applyMicroShape(NveMicroShapeTypeEnum type, float applied) {
+        Float previous = appliedMicroShapeValues.get(type);
+        if (previous != null && Float.compare(previous, applied) == 0) {
+            return;
+        }
+        microShape.setDegreeByType(type, applied);
+        appliedMicroShapeValues.put(type, applied);
+    }
+
+    void setMasterEnabled(boolean enabled) {
+        if (masterEnabled == enabled) {
+            return;
+        }
+        masterEnabled = enabled;
+
+        // Baseline 3.16.1: disabling MicroShape alone can leave its current output active.
+        beauty.setEnable(true);
+        shape.setEnable(true);
+        microShape.setEnable(true);
+        applyCurrentMasterState();
+    }
+
+    void resetAll() {
+        desiredSkinValues.clear();
+        activeBlur = "buffing-skin";
+        activeWhitening = "whitening-a";
+        appliedBlur = null;
+        appliedWhitening = null;
+        for (NveShapeTypeEnum type : SHAPE_TYPES) {
+            desiredShapeValues.put(type, 0f);
+        }
+        for (NveMicroShapeTypeEnum type : MICRO_SHAPE_TYPES) {
+            desiredMicroShapeValues.put(type, 0f);
+        }
+        applyCurrentMasterState();
+    }
+
+    private void applyCurrentMasterState() {
+        if (masterEnabled) {
+            applyAllDesiredValues();
+        } else {
+            applyAllNeutralValues();
+        }
+    }
+
+    private void applyAllDesiredValues() {
+        applySkin(activeBlur, desiredSkinValue(activeBlur));
+        applySkin(activeWhitening, desiredSkinValue(activeWhitening));
+        applySkin("matte", desiredSkinValue("matte"));
+        applySkin("matte-fill-radius", desiredSkinValue("matte-fill-radius"));
+        applySkin("reddening", desiredSkinValue("reddening"));
+        applySkin("definition", desiredSkinValue("definition"));
+        applySkin("sharpness", desiredSkinValue("sharpness"));
+        applyGeometryValues(true);
+    }
+
+    private void applyAllNeutralValues() {
+        applySkin(activeBlur, 0f);
+        applySkin(activeWhitening, 0f);
+        applySkin("matte", 0f);
+        applySkin("matte-fill-radius", 0f);
+        applySkin("reddening", 0f);
+        applySkin("definition", 0f);
+        applySkin("sharpness", 0f);
+        applyGeometryValues(false);
+    }
+
+    private void applyGeometryValues(boolean enabled) {
+        for (Map.Entry<NveShapeTypeEnum, Float> entry : desiredShapeValues.entrySet()) {
+            applyShape(entry.getKey(), enabled ? entry.getValue() : 0f);
+        }
+        for (Map.Entry<NveMicroShapeTypeEnum, Float> entry
+                : desiredMicroShapeValues.entrySet()) {
+            applyMicroShape(entry.getKey(), enabled ? entry.getValue() : 0f);
+        }
+    }
+
+    private float effectiveValue(float desiredValue) {
+        return effectiveValue(masterEnabled, desiredValue);
+    }
+
+    static float effectiveValue(boolean enabled, float desiredValue) {
+        return enabled ? desiredValue : 0f;
+    }
+
+    private float desiredSkinValue(String id) {
+        Float value = desiredSkinValues.get(id);
+        return value == null ? 0f : value;
+    }
+
+    private static boolean isPositiveOnly(NveMicroShapeTypeEnum type) {
+        return type == NveMicroShapeTypeEnum.NASOLABIAL_FOLDS
+                || type == NveMicroShapeTypeEnum.DARK_CIRCLES
+                || type == NveMicroShapeTypeEnum.BRIGHTEN_EYES
+                || type == NveMicroShapeTypeEnum.WHITEN_TEETH;
+    }
+
+    private static boolean isBlur(String id) {
+        return "buffing-skin".equals(id)
+                || "advanced-buffing-1".equals(id)
+                || "advanced-buffing-2".equals(id)
+                || "advanced-buffing-3".equals(id)
+                || "advanced-buffing-4".equals(id);
+    }
+
+    private static boolean isWhitening(String id) {
+        return "whitening-a".equals(id) || "whitening-b".equals(id);
+    }
+
+    static boolean shouldChangeSkinSelector(
+            String id, String currentBlur, String currentWhitening) {
+        return (isBlur(id) && !id.equals(currentBlur))
+                || (isWhitening(id) && !id.equals(currentWhitening));
+    }
+
+    static boolean supportsAdvancedBuffing4() {
+        NvsEffectSdkContext context = NvsEffectSdkContext.getInstance();
+        return context != null
+                && context.getDeviceCpuLevel()
+                == NvsEffectSdkContext.DEVICE_CPU_POWER_LEVEL_HIGH;
+    }
+
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+}

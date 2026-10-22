@@ -1,0 +1,28 @@
+package __TARGET_PACKAGE__;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/**
+ * Bounded coalescing queue for high-frequency control values.
+ *
+ * Each key occupies at most one pending slot. Draining returns a stable snapshot and clears the
+ * queue so control writes can be serialized with the next camera-driven render frame.
+ */
+final class NveLatestValueQueue<K, V> {
+    private final LinkedHashMap<K, V> pending = new LinkedHashMap<>();
+
+    synchronized void offer(K key, V value) {
+        pending.put(key, value);
+    }
+
+    synchronized Map<K, V> drain() {
+        Map<K, V> snapshot = new LinkedHashMap<>(pending);
+        pending.clear();
+        return snapshot;
+    }
+
+    synchronized void clear() {
+        pending.clear();
+    }
+}

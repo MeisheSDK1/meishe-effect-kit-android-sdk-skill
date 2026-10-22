@@ -1,0 +1,283 @@
+package __TARGET_PACKAGE__;
+
+import com.meishe.nveffectkit.NveEffectKit;
+import com.meishe.nveffectkit.makeup.NveComposeMakeup;
+import com.meishe.nveffectkit.makeup.NveMakeup;
+import com.meishe.nveffectkit.makeup.NveMakeupTypeEnum;
+import com.meishe.nveffectkit.makeup.NveSingleMakeUp;
+
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Long-lived makeup desired/applied state; call only through the serial control thread.
+ *
+ * A compose makeup is a base transaction. Editing one category decomposes its makeup components,
+ * while DesiredEffectState explicitly preserves or restores non-makeup compose components.
+ */
+final class NveMakeupCoordinator {
+    static final EnumSet<NveMakeupTypeEnum> SINGLE_MAKEUP_TYPES = EnumSet.of(
+            NveMakeupTypeEnum.Lip, NveMakeupTypeEnum.Eyebrow,
+            NveMakeupTypeEnum.Eyeshadow, NveMakeupTypeEnum.Eyelash,
+            NveMakeupTypeEnum.Eyeliner, NveMakeupTypeEnum.Blusher,
+            NveMakeupTypeEnum.Shadow, NveMakeupTypeEnum.Brighten,
+            NveMakeupTypeEnum.Eyeball);
+
+    /** Strongly typed host snapshot; do not replace with Object. */
+    interface ComposeConflictSnapshot {
+    }
+
+    interface DesiredEffectState {
+        ComposeConflictSnapshot snapshotComposeConflictState();
+
+        /**
+         * Return true only when every non-makeup compose component has an explicit preservation
+         * or restoration policy for a single-category override.
+         */
+        boolean canDecomposeCompose(ComposeConflictSnapshot snapshot);
+
+        /** Called after removing the SDK compose and before restoring decomposed makeup singles. */
+        void onComposeDecomposed(ComposeConflictSnapshot snapshot);
+
+        /** Called exactly once when the compose base transaction is fully cleared or replaced. */
+        void onComposeRemoved(ComposeConflictSnapshot snapshot);
+    }
+
+    static final class DesiredSnapshot {
+        private final EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> desiredSingles;
+        private final EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> composeSingles;
+        private final EnumSet<NveMakeupTypeEnum> decomposedComposeTypes;
+        private final ComposeConflictSnapshot composeConflictState;
+        private final NveComposeMakeup desiredCompose;
+
+        private DesiredSnapshot(
+                EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> desiredSingles,
+                EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> composeSingles,
+                EnumSet<NveMakeupTypeEnum> decomposedComposeTypes,
+                ComposeConflictSnapshot composeConflictState,
+                NveComposeMakeup desiredCompose) {
+            this.desiredSingles = new EnumMap<>(desiredSingles);
+            this.composeSingles = new EnumMap<>(composeSingles);
+            this.decomposedComposeTypes = EnumSet.noneOf(NveMakeupTypeEnum.class);
+            this.decomposedComposeTypes.addAll(decomposedComposeTypes);
+            this.composeConflictState = composeConflictState;
+            this.desiredCompose = desiredCompose;
+        }
+    }
+
+    private final NveMakeup makeup = new NveMakeup();
+    private final DesiredEffectState desiredState;
+    private final EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> desiredSingles =
+            new EnumMap<>(NveMakeupTypeEnum.class);
+    private final EnumMap<NveMakeupTypeEnum, NveSingleMakeUp> composeSingles =
+            new EnumMap<>(NveMakeupTypeEnum.class);
+    private final EnumSet<NveMakeupTypeEnum> decomposedComposeTypes =
+            EnumSet.noneOf(NveMakeupTypeEnum.class);
+    private ComposeConflictSnapshot composeConflictState;
+    private NveComposeMakeup desiredCompose;
+    private boolean registered;
+
+    NveMakeupCoordinator(DesiredEffectState desiredState) {
+        this.desiredState = desiredState;
+    }
+
+    NveMakeupCoordinator(
+            NveEffectKit effectKit,
+            DesiredEffectState desiredState) {
+        this(desiredState);
+        registerInBaselineOrder(effectKit);
+    }
+
+    void registerInBaselineOrder(NveEffectKit effectKit) {
+        makeup.setEnable(true);
+        effectKit.setMakeup(makeup);
+        registered = true;
+        reapplyDesiredState();
+    }
+
+    void selectSingleMakeup(NveMakeupTypeEnum type, NveSingleMakeUp selected) {
+        requireSingleType(type);
+        if (desiredCompose != null) {
+            decomposeComposeMakeup();
+        }
+        decomposedComposeTypes.remove(type);
+        if (selected == null) {
+            desiredSingles.remove(type);
+            if (registered) {
+                makeup.removeSingleMakeUp(type);
+                restoreSingles();
+            }
+        } else {
+            desiredSingles.put(type, selected);
+            if (registered) {
+                makeup.addSingleMakeUp(type, selected);
+            }
+        }
+        if (desiredCompose == null && decomposedComposeTypes.isEmpty()) {
+            finishComposeTransaction();
+        }
+    }
+
+    /** Call only after every package referenced by compose is installed and validated. */
+    void useComposeMakeup(
+            NveComposeMakeup compose,
+            Map<NveMakeupTypeEnum, NveSingleMakeUp> components) {
+        if (compose == null) {
+            removeComposeMakeup();
+            return;
+        }
+        requireCompleteComponents(components);
+        if (desiredCompose != null
+                || !decomposedComposeTypes.isEmpty()
+                || composeConflictState != null) {
+            removeComposeMakeup();
+        }
+        composeConflictState = desiredState.snapshotComposeConflictState();
+        if (composeConflictState == null) {
+            throw new IllegalStateException("compose conflict snapshot must not be null");
+        }
+        desiredCompose = compose;
+        composeSingles.clear();
+        composeSingles.putAll(components);
+        if (registered) {
+            makeup.useComposeMakeup(compose);
+        }
+    }
+
+    /**
+     * Removes the active compose or its still-inherited decomposed components.
+     * Explicit single selections that replaced compose categories remain applied.
+     */
+    void removeComposeMakeup() {
+        desiredCompose = null;
+        composeSingles.clear();
+        if (registered) {
+            makeup.removeComposeMakeUp();
+        }
+        for (NveMakeupTypeEnum type :
+                copyTypes(decomposedComposeTypes)) {
+            desiredSingles.remove(type);
+            if (registered) {
+                makeup.removeSingleMakeUp(type);
+            }
+        }
+        decomposedComposeTypes.clear();
+        finishComposeTransaction();
+        if (registered) {
+            restoreSingles();
+        }
+    }
+
+    DesiredSnapshot snapshotDesiredState() {
+        return new DesiredSnapshot(
+                desiredSingles,
+                composeSingles,
+                decomposedComposeTypes,
+                composeConflictState,
+                desiredCompose);
+    }
+
+    /**
+     * In-memory lifecycle restore. Process-death restore must rehydrate SDK objects from stable
+     * catalog IDs held by NveMakeupSelectionState before calling this coordinator.
+     */
+    void restoreDesiredState(DesiredSnapshot snapshot) {
+        if (snapshot == null) {
+            throw new IllegalArgumentException("snapshot must not be null");
+        }
+        desiredSingles.clear();
+        desiredSingles.putAll(snapshot.desiredSingles);
+        composeSingles.clear();
+        composeSingles.putAll(snapshot.composeSingles);
+        decomposedComposeTypes.clear();
+        decomposedComposeTypes.addAll(snapshot.decomposedComposeTypes);
+        composeConflictState = snapshot.composeConflictState;
+        desiredCompose = snapshot.desiredCompose;
+        if (registered) {
+            clearSdkMakeup();
+            reapplyDesiredState();
+        }
+    }
+
+    private void decomposeComposeMakeup() {
+        if (composeConflictState == null
+                || !desiredState.canDecomposeCompose(composeConflictState)) {
+            throw new IllegalStateException(
+                    "compose cannot be decomposed without a non-makeup component policy");
+        }
+        if (registered) {
+            makeup.removeComposeMakeUp();
+        }
+        desiredCompose = null;
+        desiredSingles.clear();
+        desiredSingles.putAll(composeSingles);
+        decomposedComposeTypes.clear();
+        decomposedComposeTypes.addAll(composeSingles.keySet());
+        composeSingles.clear();
+        desiredState.onComposeDecomposed(composeConflictState);
+        if (registered) {
+            restoreSingles();
+        }
+    }
+
+    private void finishComposeTransaction() {
+        if (composeConflictState == null) {
+            return;
+        }
+        desiredState.onComposeRemoved(composeConflictState);
+        composeConflictState = null;
+    }
+
+    private void reapplyDesiredState() {
+        if (desiredCompose != null) {
+            makeup.useComposeMakeup(desiredCompose);
+            return;
+        }
+        restoreSingles();
+    }
+
+    private void clearSdkMakeup() {
+        makeup.removeComposeMakeUp();
+        for (NveMakeupTypeEnum type : SINGLE_MAKEUP_TYPES) {
+            makeup.removeSingleMakeUp(type);
+        }
+    }
+
+    private void restoreSingles() {
+        for (Map.Entry<NveMakeupTypeEnum, NveSingleMakeUp> entry
+                : desiredSingles.entrySet()) {
+            makeup.addSingleMakeUp(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static void requireCompleteComponents(
+            Map<NveMakeupTypeEnum, NveSingleMakeUp> components) {
+        if (components == null
+                || !components.keySet().containsAll(SINGLE_MAKEUP_TYPES)) {
+            throw new IllegalArgumentException(
+                    "compose makeup must provide all nine single-makeup components");
+        }
+        for (NveMakeupTypeEnum type : SINGLE_MAKEUP_TYPES) {
+            if (components.get(type) == null) {
+                throw new IllegalArgumentException(
+                        "compose makeup component must not be null: " + type);
+            }
+        }
+    }
+
+    private static EnumSet<NveMakeupTypeEnum> copyTypes(
+            Set<NveMakeupTypeEnum> source) {
+        EnumSet<NveMakeupTypeEnum> result =
+                EnumSet.noneOf(NveMakeupTypeEnum.class);
+        result.addAll(source);
+        return result;
+    }
+
+    private static void requireSingleType(NveMakeupTypeEnum type) {
+        if (!SINGLE_MAKEUP_TYPES.contains(type)) {
+            throw new IllegalArgumentException("unsupported single makeup type: " + type);
+        }
+    }
+}

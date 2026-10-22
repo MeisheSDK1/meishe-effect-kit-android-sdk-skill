@@ -1,0 +1,138 @@
+package __TARGET_PACKAGE__;
+
+import android.content.Context;
+import android.os.Looper;
+
+import com.meishe.nveffectkit.NveEffectKit;
+import com.meishe.nveffectkit.constants.NveDetectionModelType;
+
+/**
+ * One owner per process/business session. UI owns desired state; this class owns SDK identity.
+ */
+final class NveSessionOwner {
+    enum State { UNINITIALIZED, SDK_READY, GL_READY, RUNNING, PAUSED, DESTROYED }
+
+    interface HostGlResources {
+        /** Called on the GL thread while the old EGLContext is still current. */
+        void releaseHostGlResources();
+    }
+
+    interface ControllerRestorer {
+        /** Register or restore one selected feature group in baseline order. */
+        void restore(NveEffectKit effectKit);
+    }
+
+    private final NveEffectKit effectKit = NveEffectKit.getInstance();
+    private volatile State state = State.UNINITIALIZED;
+    private volatile boolean faceReady;
+    private volatile boolean faceCommonReady;
+    private volatile boolean advancedBeautyReady;
+    private volatile boolean eyeballReady;
+
+    boolean init(Context context, String licensePath) {
+        if (state != State.UNINITIALIZED) {
+            return state != State.DESTROYED;
+        }
+        boolean ready = effectKit.init(context.getApplicationContext(), licensePath);
+        state = ready ? State.SDK_READY : State.UNINITIALIZED;
+        return ready;
+    }
+
+    /**
+     * Registered 3.16.1 initialization contract. Paths must come from the matching delivery;
+     * pass requireAdvancedBeauty=false only for Shape/MicroShape-only scope.
+     */
+    boolean initBeautyModels(
+            Context context,
+            String faceModelPath,
+            String faceCommonModelPath,
+            String advancedBeautyModelPath,
+            boolean requireAdvancedBeauty,
+            String eyeballModelPath,
+            boolean requireEyeball) {
+        if (state != State.SDK_READY) {
+            return false;
+        }
+        faceReady = effectKit.initModel(
+                context, NveDetectionModelType.FACE, faceModelPath);
+        faceCommonReady = effectKit.initModel(
+                context, NveDetectionModelType.FACE_COMMON, faceCommonModelPath);
+        advancedBeautyReady = !requireAdvancedBeauty || effectKit.initModel(
+                context, NveDetectionModelType.ADVANCED_BEAUTY, advancedBeautyModelPath);
+        eyeballReady = !requireEyeball || effectKit.initModel(
+                context, NveDetectionModelType.EYEBALL, eyeballModelPath);
+        return faceReady && faceCommonReady && advancedBeautyReady && eyeballReady;
+    }
+
+    /**
+     * Baseline contract: call on the Android main thread after GL resources are ready.
+     * Do not call this directly from GLSurfaceView.queueEvent.
+     */
+    boolean initializeAfterGlReady(ControllerRestorer... restorers) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            throw new IllegalStateException("baseline initialize must run on Android main thread");
+        }
+        if (state != State.SDK_READY && state != State.PAUSED) {
+            return false;
+        }
+        effectKit.initialize();
+        state = State.GL_READY;
+        if (restorers != null) {
+            for (ControllerRestorer restorer : restorers) {
+                if (restorer != null) {
+                    restorer.restore(effectKit);
+                }
+            }
+        }
+        state = State.RUNNING;
+        return true;
+    }
+
+    /**
+     * Baseline teardown: stop frame submission first, then call this on the GL thread.
+     * cleanUp is last because this baseline may change/detach current EGL state.
+     */
+    void cleanUpOnGlThread(HostGlResources host) {
+        if (state == State.DESTROYED) {
+            return;
+        }
+        host.releaseHostGlResources();
+        if (state == State.UNINITIALIZED || state == State.SDK_READY) {
+            return;
+        }
+        effectKit.cleanUp();
+        state = State.PAUSED;
+    }
+
+    void destroyLastOwner() {
+        if (state == State.DESTROYED) {
+            return;
+        }
+        effectKit.destroy();
+        state = State.DESTROYED;
+    }
+
+    boolean canApply() {
+        return state == State.RUNNING;
+    }
+
+    boolean canApplyShapeOrMicroShape() {
+        return canApply() && faceReady && faceCommonReady;
+    }
+
+    boolean canApplySkin() {
+        return canApplyShapeOrMicroShape() && advancedBeautyReady;
+    }
+
+    boolean canApplyMakeup() {
+        return canApplySkin() && eyeballReady;
+    }
+
+    boolean canApplyFaceProp() {
+        return canApply() && faceReady;
+    }
+
+    NveEffectKit effectKit() {
+        return effectKit;
+    }
+}

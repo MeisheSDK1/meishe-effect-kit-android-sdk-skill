@@ -1,0 +1,108 @@
+package __TARGET_PACKAGE__;
+
+import android.content.Context;
+import android.graphics.drawable.GradientDrawable;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+
+/**
+ * Shared bottom entry bar and expansion coordinator for compact effect panels.
+ *
+ * The bar and an expanded panel are mutually exclusive. The active panel consumes touches
+ * inside its bounds; its full-screen host handles blank-area clicks and collapses it.
+ */
+final class NveCompactEffectEntryBar extends LinearLayout {
+    interface Panel {
+        interface ExpansionListener {
+            void onExpansionChanged(boolean expanded);
+        }
+
+        View detachEntryButton();
+        void setEntryVisible(boolean visible);
+        void setExpansionListener(ExpansionListener listener);
+        void collapse();
+    }
+
+    private static final int COLOR_BACKGROUND = 0xE61B1B24;
+    private static final int COLOR_OUTLINE = 0x3DFFFFFF;
+    private final Panel[] panels;
+
+    NveCompactEffectEntryBar(Context context, Panel... panels) {
+        super(context);
+        if (panels == null || panels.length == 0) {
+            throw new IllegalArgumentException("entry bar requires at least one panel");
+        }
+        this.panels = panels.clone();
+        setOrientation(HORIZONTAL);
+        setGravity(Gravity.CENTER);
+        setPadding(dp(8), dp(6), dp(8), dp(6));
+        setElevation(dp(10));
+
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(COLOR_BACKGROUND);
+        background.setCornerRadius(dp(24));
+        background.setStroke(dp(1), COLOR_OUTLINE);
+        setBackground(background);
+
+        for (Panel panel : this.panels) {
+            addEntry(panel.detachEntryButton());
+        }
+        for (Panel panel : this.panels) {
+            panel.setExpansionListener(expanded ->
+                    onPanelExpansionChanged(panel, expanded));
+        }
+    }
+
+    FrameLayout.LayoutParams createBottomLayoutParams() {
+        return createBottomLayoutParams(0);
+    }
+
+    FrameLayout.LayoutParams createBottomLayoutParams(int bottomInsetPx) {
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        params.leftMargin = dp(8);
+        params.rightMargin = dp(8);
+        params.bottomMargin = dp(8) + Math.max(0, bottomInsetPx);
+        return params;
+    }
+
+    FrameLayout.LayoutParams createPanelLayoutParams() {
+        return new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT);
+    }
+
+    private void onPanelExpansionChanged(Panel activePanel, boolean expanded) {
+        if (expanded) {
+            for (Panel panel : panels) {
+                if (panel != activePanel) {
+                    panel.collapse();
+                }
+            }
+        }
+        setEntriesVisible(!expanded);
+    }
+
+    private void setEntriesVisible(boolean visible) {
+        setVisibility(visible ? VISIBLE : GONE);
+        for (Panel panel : panels) {
+            panel.setEntryVisible(visible);
+        }
+    }
+
+    private void addEntry(View entry) {
+        FrameLayout slot = new FrameLayout(getContext());
+        addView(slot, new LinearLayout.LayoutParams(0, dp(36), 1f));
+        slot.addView(entry, new FrameLayout.LayoutParams(
+                dp(64), dp(32), Gravity.CENTER));
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+}

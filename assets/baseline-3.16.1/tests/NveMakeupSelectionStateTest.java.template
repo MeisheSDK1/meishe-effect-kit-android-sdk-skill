@@ -1,0 +1,84 @@
+package __TARGET_PACKAGE__;
+
+import com.meishe.nveffectkit.makeup.NveMakeupTypeEnum;
+
+import org.junit.Test;
+
+import java.util.EnumSet;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+public class NveMakeupSelectionStateTest {
+    private static final EnumSet<NveMakeupTypeEnum> ALL_TYPES = EnumSet.of(
+            NveMakeupTypeEnum.Lip, NveMakeupTypeEnum.Eyebrow,
+            NveMakeupTypeEnum.Eyeshadow, NveMakeupTypeEnum.Eyelash,
+            NveMakeupTypeEnum.Eyeliner, NveMakeupTypeEnum.Blusher,
+            NveMakeupTypeEnum.Shadow, NveMakeupTypeEnum.Brighten,
+            NveMakeupTypeEnum.Eyeball);
+
+    @Test
+    public void composeOverrideAndClearKeepsExplicitSingle() {
+        NveMakeupSelectionState state = new NveMakeupSelectionState();
+        state.selectCompose("barbie", ALL_TYPES);
+
+        state.selectSingle(NveMakeupTypeEnum.Lip, "thai-lip");
+
+        assertTrue(state.isComposeSelected());
+        assertTrue(state.isComposeDecomposed());
+        assertEquals("thai-lip", state.selectedSingleId(NveMakeupTypeEnum.Lip));
+        assertTrue(state.isInheritedFromCompose(NveMakeupTypeEnum.Eyebrow));
+
+        state.clearCompose();
+
+        assertFalse(state.isComposeSelected());
+        assertEquals("thai-lip", state.selectedSingleId(NveMakeupTypeEnum.Lip));
+        assertFalse(state.hasCategorySelection(NveMakeupTypeEnum.Eyebrow));
+    }
+
+    @Test
+    public void categoryNoneClearsOnlyThatCategory() {
+        NveMakeupSelectionState state = new NveMakeupSelectionState();
+        state.selectSingle(NveMakeupTypeEnum.Lip, "lip");
+        state.selectSingle(NveMakeupTypeEnum.Eyebrow, "eyebrow");
+
+        state.clearSingle(NveMakeupTypeEnum.Lip);
+
+        assertNull(state.selectedSingleId(NveMakeupTypeEnum.Lip));
+        assertEquals(
+                "eyebrow",
+                state.selectedSingleId(NveMakeupTypeEnum.Eyebrow));
+    }
+
+    @Test
+    public void switchingComposeReplacesBaseAndRestoresExplicitState() {
+        NveMakeupSelectionState state = new NveMakeupSelectionState();
+        state.selectSingle(NveMakeupTypeEnum.Lip, "thai-lip");
+        state.selectCompose("barbie", ALL_TYPES);
+        state.selectCompose("retro", ALL_TYPES);
+
+        assertEquals("retro", state.selectedComposeId());
+        state.clearCompose();
+
+        assertEquals("thai-lip", state.selectedSingleId(NveMakeupTypeEnum.Lip));
+    }
+
+    @Test
+    public void snapshotRestoresComposeProvenance() {
+        NveMakeupSelectionState state = new NveMakeupSelectionState();
+        state.selectCompose("barbie", ALL_TYPES);
+        state.selectSingle(NveMakeupTypeEnum.Lip, "thai-lip");
+        NveMakeupSelectionState.Snapshot snapshot = state.snapshot();
+
+        NveMakeupSelectionState restored = new NveMakeupSelectionState();
+        restored.restore(snapshot);
+
+        assertEquals("barbie", restored.selectedComposeId());
+        assertEquals(
+                "thai-lip",
+                restored.selectedSingleId(NveMakeupTypeEnum.Lip));
+        assertTrue(restored.isInheritedFromCompose(NveMakeupTypeEnum.Eyebrow));
+    }
+}

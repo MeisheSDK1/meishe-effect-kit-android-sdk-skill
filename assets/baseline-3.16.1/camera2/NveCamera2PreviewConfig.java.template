@@ -1,0 +1,96 @@
+package __TARGET_PACKAGE__;
+
+import android.hardware.camera2.CaptureRequest;
+import android.util.Range;
+import android.util.Size;
+
+import java.util.Arrays;
+import java.util.Collections;
+
+/**
+ * Low-latency Camera2 preview defaults for the OES + YUV dual-output profile.
+ *
+ * Pass only sizes supported by both the OES Surface and YUV_420_888 ImageReader. The selected
+ * FPS range is a request to the camera HAL; low-light auto exposure may still lower actual FPS.
+ */
+final class NveCamera2PreviewConfig {
+    static final int PREFERRED_PREVIEW_WIDTH = 1280;
+    static final int PREFERRED_PREVIEW_HEIGHT = 720;
+    static final int PREFERRED_PREVIEW_FPS = 30;
+
+    private NveCamera2PreviewConfig() {
+    }
+
+    static Size chooseSharedPreviewSize(Size[] choices) {
+        if (choices == null || choices.length == 0) {
+            return null;
+        }
+        for (Size size : choices) {
+            if (size.getWidth() == PREFERRED_PREVIEW_WIDTH
+                    && size.getHeight() == PREFERRED_PREVIEW_HEIGHT) {
+                return size;
+            }
+        }
+
+        double targetRatio =
+                (double) PREFERRED_PREVIEW_WIDTH / PREFERRED_PREVIEW_HEIGHT;
+        long targetArea =
+                (long) PREFERRED_PREVIEW_WIDTH * PREFERRED_PREVIEW_HEIGHT;
+        Size best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (Size size : choices) {
+            long area = (long) size.getWidth() * size.getHeight();
+            if (size.getWidth() > PREFERRED_PREVIEW_WIDTH
+                    || size.getHeight() > PREFERRED_PREVIEW_HEIGHT
+                    || area > targetArea) {
+                continue;
+            }
+            double ratio = (double) size.getWidth() / size.getHeight();
+            double ratioPenalty = Math.abs(ratio - targetRatio) * 10.0;
+            double areaPenalty =
+                    Math.abs(Math.log((double) area / Math.max(1L, targetArea)));
+            double score = ratioPenalty + areaPenalty;
+            if (score < bestScore) {
+                bestScore = score;
+                best = size;
+            }
+        }
+        if (best != null) {
+            return best;
+        }
+        return Collections.min(
+                Arrays.asList(choices),
+                (left, right) -> Long.compare(
+                        Math.abs((long) left.getWidth() * left.getHeight() - targetArea),
+                        Math.abs((long) right.getWidth() * right.getHeight() - targetArea)));
+    }
+
+    static Range<Integer> choosePreviewFpsRange(Range<Integer>[] ranges) {
+        if (ranges == null || ranges.length == 0) {
+            return null;
+        }
+        Range<Integer> best = null;
+        for (Range<Integer> range : ranges) {
+            if (range.getLower() == PREFERRED_PREVIEW_FPS
+                    && range.getUpper() == PREFERRED_PREVIEW_FPS) {
+                return range;
+            }
+            if (best == null
+                    || range.getUpper() > best.getUpper()
+                    || (range.getUpper().equals(best.getUpper())
+                            && range.getLower() > best.getLower())) {
+                best = range;
+            }
+        }
+        return best;
+    }
+
+    static void applyPreviewFps(
+            CaptureRequest.Builder builder, Range<Integer> previewFpsRange) {
+        if (builder != null && previewFpsRange != null) {
+            builder.set(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    previewFpsRange);
+        }
+    }
+}
