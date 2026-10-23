@@ -32,7 +32,7 @@ Beauty camera · live streaming · short video · social apps · video conferenc
 3. Configure beauty, makeup, filters, or AR assets.
 4. Validate performance on target devices.
 
-> Dependency coordinates, asset guides, and API references: see the repository docs.
+> Dependency coordinates, asset guides, and SDK references: see the repository docs.
 
 ## Usage
 
